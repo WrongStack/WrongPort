@@ -17,3 +17,6 @@ web-dist/
 # Tool state
 .temp_files/
 .design/
+
+.dfmt/
+.claude/settings.json

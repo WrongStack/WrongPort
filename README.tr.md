@@ -6,6 +6,14 @@ Development ortamında hangi süreçlerin hangi TCP portlarını dinlediğini g�
 
 ## Kurulum
 
+npm'den global kurulum:
+
+```bash
+npm install -g wrongport
+```
+
+Ya da kaynaktan derleyin:
+
 ```bash
 npm install
 npm run build        # dist/ (core + cli + api) ve web-dist/ (web UI)

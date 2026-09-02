@@ -6,6 +6,14 @@ A small tool that shows which processes are listening on which TCP ports in your
 
 ## Install
 
+Install globally from npm:
+
+```bash
+npm install -g wrongport
+```
+
+Or build from source:
+
 ```bash
 npm install
 npm run build        # dist/ (core + cli + api) and web-dist/ (web UI)
