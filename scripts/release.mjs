@@ -38,9 +38,22 @@ const git = (gitArgs, { capture = false, allowFailure = false } = {}) => {
 };
 
 const npm = (npmArgs) => {
-  // npm is npm.cmd on Windows; spawnSync needs the exact binary name there.
-  const bin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const result = spawnSync(bin, npmArgs, { cwd: root, stdio: 'inherit' });
+  // Windows cannot spawn npm.cmd without a shell (Node >= 18.20 returns
+  // EINVAL), and .cmd shims differ per installation. When running under npm
+  // (the normal `npm run release` path) reuse the npm JS entry point that is
+  // already executing this script; otherwise fall back to a shelled .cmd.
+  const execPath = process.env.npm_execpath;
+  const result =
+    execPath !== undefined && execPath.endsWith('.js')
+      ? spawnSync(process.execPath, [execPath, ...npmArgs], { cwd: root, stdio: 'inherit' })
+      : spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', npmArgs, {
+          cwd: root,
+          stdio: 'inherit',
+          shell: process.platform === 'win32',
+        });
+  if (result.error !== undefined) {
+    die(`npm ${npmArgs.join(' ')} could not start: ${result.error.message}`);
+  }
   if (result.status !== 0) die(`npm ${npmArgs.join(' ')} failed`);
 };
 
