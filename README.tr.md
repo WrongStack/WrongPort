@@ -74,7 +74,7 @@ npm run release -- --push  # branch ve tag'i de pushlar
 npm run release:dry        # yalnızca plan: yazma, commit, tag yok
 ```
 
-Script kirli bir çalışma ağacını reddeder; gerçek release'te (`--dry-run` hariç) `main` dışında bir branch'i de reddeder. Ardından `npm run verify`'i çalıştırır — typecheck, testler ve %100 coverage gate'i dâhil — sonra `package.json`, `package-lock.json` ve `src/cli/index.ts` içindeki CLI sürüm satırını birlikte güncelleyip `chore(release): vX.Y.Z` commit'ini atar ve `vX.Y.Z` etiketler. `--push` olmadan hiçbir şey uzak sunucuya gitmez.
+Tag'i pushlamak (`npm run release -- --push`) GitHub Actions `Release` workflow'unu tetikler; workflow temiz bir `npm ci` ile kurar, `npm run verify`'i yeniden çalıştırır ve paketi deponun `NPM_TOKEN` secret'ıyla npm'e yayınlar. Yayınlanan paket yalnızca `dist/` ve `web-dist/`'i içerir (`files` allowlist).
 
 ## Testler
 

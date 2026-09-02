@@ -4,6 +4,10 @@
   "description": "Inspect dev servers and their ports — list, watch, and kill processes from the CLI or a small web UI.",
   "type": "module",
   "license": "MIT",
+  "files": [
+    "dist",
+    "web-dist"
+  ],
   "engines": {
     "node": ">=22"
   },

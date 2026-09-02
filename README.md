@@ -76,6 +76,8 @@ npm run release:dry        # plan only: no writes, no commit, no tag
 
 The script refuses a dirty working tree; outside `--dry-run` it also refuses any branch but `main`. It then runs `npm run verify` — typecheck, tests and the 100% coverage gate included — then bumps `package.json`, `package-lock.json` and the CLI banner in `src/cli/index.ts` in lockstep, commits `chore(release): vX.Y.Z` and tags `vX.Y.Z`. Nothing leaves the machine without `--push`.
 
+Pushing the tag (`npm run release -- --push`) triggers the GitHub Actions `Release` workflow, which installs with a clean `npm ci`, runs `npm run verify` again, and publishes the package to npm with the repository's `NPM_TOKEN` secret. The published package ships only `dist/` and `web-dist/` (the `files` allowlist).
+
 ## Tests
 
 ```bash

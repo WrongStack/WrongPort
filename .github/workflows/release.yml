@@ -1,0 +1,27 @@
+name: Release
+
+# Runs when a release tag (created by `npm run release -- --push`) lands on
+# GitHub: re-runs the verify gate, then publishes the package with the
+# repository's NPM_TOKEN secret.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
