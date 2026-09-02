@@ -56,7 +56,7 @@ Proje kökünde `wrongport.config.json` (veya `.wrongportrc.json`), yoksa `~/.co
 npm run dev:api      # API'yi tsx watch ile çalıştırır (3789)
 npm run dev:web      # Vite dev sunucusu (5174, /api → 3789 proxy)
 npm run typecheck    # hem node hem web tarafı için tsc
-npm test             # vitest: 7 dosya / 70 birim test (ayrıntı: aşağıdaki Testler)
+npm test             # vitest: 10 dosya / 80 birim test (ayrıntı: aşağıdaki Testler)
 npm run verify       # typecheck + test + build zinciri (tek komut, sırayla)
 npm run build        # tsc + vite build
 ```
@@ -64,7 +64,7 @@ npm run build        # tsc + vite build
 ## Testler
 
 ```bash
-npm test            # vitest run — 7 dosya / 70 test (~2 sn)
+npm test            # vitest run — 10 dosya / 80 test (~2 sn)
 ```
 
 | Dosya | Kapsam |
@@ -76,6 +76,9 @@ npm test            # vitest run — 7 dosya / 70 test (~2 sn)
 | `web/src/filterQuery.test.ts` | Arayüz filtre kutusu → sunucu parametresi eşlemesi: sayı/sayı listesi → `ports`, diğer her metin → `only` (regex), boş girdi → parametresiz |
 | `web/src/api.test.ts` | İstemci API katmanı: sorgu parametresi kurulumu, sunucu hata mesajının yüzeylendirilmesi, 409 "stale snapshot" kill kurtarması (tek kez yenile + tekrar; diğer hatalarda tekrar yok) |
 | `web/src/portAddress.test.ts` | Wildcard bind (`*`, `0.0.0.0`, `[::]`, `::`) ile loopback/LAN adres ayrımı — port rozeti renklendirmesi buna dayanır |
+| `web/src/components/PortBadges.test.tsx` | Rozet tonlaması (jsdom + Testing Library): wildcard → `*:port` + uyarı tonu, loopback → normal ton, belirli arayüz → uyarı tonu ve "loopback only" olmayan başlık |
+| `web/src/components/PidCell.test.tsx` | PID hücresi: tıklayınca panoya kopyalar ve "copied ✓" gösterir; panonun yokluğunda sessizce bozulur |
+| `web/src/components/HiddenProcessesHint.test.tsx` | Gizli süreç ipucu: 0/negatif sayıda hiçbir şey çizmez, pozitif sayıda sayıyı ve yönlendirmeyi yazar |
 
 Notlar:
 
@@ -84,6 +87,7 @@ Notlar:
 - `src/core/inspector.ts` içindeki `lsof`/`ps` çağrıları 5 sn timeout ile korumalıdır; asılan bir alt süreç testi değil `ScanError`'ı yüzeye çıkarır.
 - Arayüz filtre kutusu sunucu tarafına bağlıdır (250 ms debounce): sayı → `ports=`, diğer metin → `only=`. Eski client-side substring filtresi kaldırıldı — fark şu: client-side yalnızca sunucunun döndürdüğü satırları daraltabilirdi; sunucu filtresi (`only`) varsayılan dev filtresinde gizli süreçleri ortaya çıkarabilir, `ports=` ise `all=1` dâhil her modda sert kısıttır. Geçersiz `only` deseni (ör. `[`) 400 + açıklayıcı mesaj döner ve mesaj arayüzdeki hata bandında görünür.
 - `ls --watch` tek seferlik tarama hatasında (timeout, yoğun makine) döngüyü sürdürür; üst üste 5 hata watch modunu sonlandırır ve başarıdan sonra hata kodu temizlenir.
+- Arayüz bileşen testleri jsdom + Testing Library ile, dosya başına `// @vitest-environment jsdom` bildirimiyle çalışır — genel ortam 'node' kaldığı için sunucu testleri yavaşlamaz. `@testing-library/react` ve `jsdom` devDependency'dir.
 - Arayüzde wildcard bind'li portlar (`*:3000`, `0.0.0.0`, `[::]`) `*:port` biçiminde ve uyarı rengiyle gösterilir — "dev sunucum ağa mı açıktı?" sorusunun cevabı ilk bakışta görünür. Belirli bir arayüze bağlı portlar (ör. `192.168.1.5:3000`, `[::ffff:…]`) da uyarı rengiyle, "ağdan erişilebilir olabilir" notuyla gösterilir; yalnızca loopback rozetleri normal renktedir. PID hücresine tıklamak panoya kopyalar.
 - Tablo dolu olduğunda da dev filtresiyle gizlenen ek süreç sayısı tablo altında yazılır ("all processes" işaretiyle açılır).
 - Arayüzdeki kill, sunucunun 409 (stale snapshot) cevabında — mesaj metninden bağımsız olarak — snapshot'ı bir kez yenileyip tekrar dener; polling kapalıyken veya onayda gecikince kill yine de çalışır. Sekmeye geri dönüldüğünde bir sonraki poll'u beklemeden tazeleme yapılır.

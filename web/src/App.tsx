@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { killWithStaleRecovery } from './api';
-import { filterBoxToQuery, SUGGESTED_ONLY_PATTERNS } from './filterQuery';
-import { isLoopbackBinding, isWildcardBinding } from './portAddress';
+import { HiddenProcessesHint } from './components/HiddenProcessesHint';
 import { KillButton } from './components/KillButton';
-import type { DevProcess, PortEntry } from './types';
+import { PidCell } from './components/PidCell';
+import { PortBadges } from './components/PortBadges';
+import { filterBoxToQuery, SUGGESTED_ONLY_PATTERNS } from './filterQuery';
+import type { DevProcess } from './types';
 import { useProcesses } from './useProcesses';
 
 const INTERVAL_OPTIONS = [
@@ -35,6 +37,7 @@ export default function App() {
   const processes = snapshot?.processes ?? [];
 
   const portCount = processes.reduce((sum, proc) => sum + proc.ports.length, 0);
+  const hiddenCount = snapshot !== null ? snapshot.scannedCount - processes.length : 0;
 
   const kill: KillAction = async (pid, force) => {
     setActionError(null);
@@ -157,12 +160,7 @@ export default function App() {
         ) : (
           <>
             <ProcessTable processes={processes} onKill={(pid, force) => void kill(pid, force)} />
-            {snapshot !== null && snapshot.scannedCount > processes.length && (
-              <p className="mt-3 font-mono text-xs text-muted">
-                {snapshot.scannedCount - processes.length} more listening process(es) hidden by the
-                dev filter — enable "all processes" or add a filter chip to reveal them.
-              </p>
-            )}
+            <HiddenProcessesHint hiddenCount={hiddenCount} />
           </>
         )}
       </main>
@@ -183,67 +181,6 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return () => window.clearTimeout(timer);
   }, [value, delayMs]);
   return debounced;
-}
-
-function PortBadges({ ports }: { ports: PortEntry[] }) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {ports.map((entry) => {
-        // Three-way: wildcard binds are network-reachable, loopback is the
-        // only provably unreachable case, and a specific-interface bind (LAN
-        // IP, IPv4-mapped) must not be labelled "loopback only".
-        const tone = isWildcardBinding(entry.address)
-          ? 'exposed'
-          : isLoopbackBinding(entry.address)
-            ? 'loopback'
-            : 'bound';
-        const title =
-          tone === 'exposed'
-            ? `${entry.address} — listening on all interfaces (reachable from the network)`
-            : tone === 'loopback'
-              ? `${entry.address} — loopback only`
-              : `${entry.address} — bound to a specific interface (may be reachable from the network)`;
-        return (
-          <span
-            key={`${entry.address}:${entry.port}`}
-            title={title}
-            className={`rounded-sm border px-1.5 py-0.5 font-mono text-xs ${
-              tone === 'loopback'
-                ? 'border-primary/30 bg-primary/10 text-primary'
-                : 'border-warning/40 bg-warning/10 text-warning'
-            }`}
-          >
-            {tone === 'exposed' ? `*:${entry.port}` : entry.port}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
-function PidCell({ pid }: { pid: number }) {
-  const [copied, setCopied] = useState(false);
-  const copy = (): void => {
-    navigator.clipboard
-      ?.writeText(String(pid))
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch(() => {
-        // Clipboard unavailable (e.g. insecure origin) — the pid stays visible.
-      });
-  };
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      title={`Copy pid ${pid}`}
-      className="font-mono text-xs text-muted transition-colors duration-150 hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-    >
-      {copied ? 'copied ✓' : pid}
-    </button>
-  );
 }
 
 function ProcessTable({ processes, onKill }: { processes: DevProcess[]; onKill: KillAction }) {

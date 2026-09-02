@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config';
 // which would make Vitest look for tests in the wrong place.
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts', 'web/src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'web/src/**/*.test.{ts,tsx}'],
     environment: 'node',
   },
 });
