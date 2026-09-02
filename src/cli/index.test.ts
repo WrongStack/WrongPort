@@ -59,6 +59,10 @@ const CONFIG_TOKEN = { includePatterns: [], excludePatterns: [] } as never;
 const parse = (args: string[]): Promise<unknown> =>
   program.parseAsync(['node', 'wrongport', ...args]);
 
+const setPlatform = (value: NodeJS.Platform): void => {
+  Object.defineProperty(process, 'platform', { value, configurable: true });
+};
+
 const logged = (): string[] =>
   vi.mocked(console.log).mock.calls.map((call) => call.map((arg) => String(arg)).join(' '));
 
@@ -363,20 +367,27 @@ describe('serve', () => {
       unref: () => {},
     });
 
-    await parse(['serve', '--open']);
-    expect(spawnMock).toHaveBeenCalledWith(
-      'cmd',
-      ['/c', 'start', '', 'http://127.0.0.1:3789'],
-      { detached: true, stdio: 'ignore' },
-    );
-    handlers.error?.(new Error('no default browser'));
-    expect(errored().join('\n')).toContain('Could not open a browser');
+    // Pin the Windows arm so the assertions hold on every CI OS.
+    const original = process.platform;
+    setPlatform('win32');
+    try {
+      await parse(['serve', '--open']);
+      expect(spawnMock).toHaveBeenCalledWith(
+        'cmd',
+        ['/c', 'start', '', 'http://127.0.0.1:3789'],
+        { detached: true, stdio: 'ignore' },
+      );
+      handlers.error?.(new Error('no default browser'));
+      expect(errored().join('\n')).toContain('Could not open a browser');
 
-    spawnMock.mockImplementation(() => {
-      throw new Error('spawn exploded');
-    });
-    await parse(['serve', '--open']);
-    expect(errored().join('\n')).toContain('Could not open a browser');
+      spawnMock.mockImplementation(() => {
+        throw new Error('spawn exploded');
+      });
+      await parse(['serve', '--open']);
+      expect(errored().join('\n')).toContain('Could not open a browser');
+    } finally {
+      setPlatform(original);
+    }
   });
 
   it('picks the platform browser command', async () => {
@@ -384,9 +395,6 @@ describe('serve', () => {
     startServerMock.mockResolvedValue({ url: 'http://127.0.0.1:3789', close: () => {} });
     spawnMock.mockReturnValue({ on: () => {}, unref: () => {} });
     const original = process.platform;
-    const setPlatform = (value: string): void => {
-      Object.defineProperty(process, 'platform', { value, configurable: true });
-    };
     try {
       setPlatform('darwin');
       await parse(['serve', '--open']);
