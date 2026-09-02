@@ -264,6 +264,22 @@ describe('GET /api/processes query parameters', () => {
     }
   });
 
+  it('never authorizes a kill without a prior snapshot (no fallback scan)', async () => {
+    const app = createApp(config);
+    const { child, pid } = await spawnListener();
+    try {
+      // No GET /api/processes first: the listener has never been listed.
+      const res = await killRequest(app, { pid });
+      expect(res.status).toBe(409);
+      const data = (await res.json()) as { error: string };
+      expect(data.error).toMatch(/was not in the latest scan/);
+      // The target must still be alive — unlisted pids may not be killed.
+      expect(child.exitCode).toBeNull();
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
   it('returns 400 with a helpful message for an invalid only= regex', async () => {
     const app = createApp(config);
     const res = await app.request(`/api/processes?only=${encodeURIComponent('[')}`);

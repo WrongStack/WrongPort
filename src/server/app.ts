@@ -77,15 +77,14 @@ export function createApp(config: ResolvedConfig, webDistDir?: string): Hono {
     if (!body || !Number.isInteger(pid) || pid <= 0) {
       return c.json({ error: 'Body must be JSON: {"pid": number, "force"?: boolean}' }, 400);
     }
-    // Safety rail: only pids that appeared in a recent scan may be killed —
-    // this endpoint is not a generic remote kill switch.
-    let known = false;
-    if (latest && Date.now() - latest.at < SNAPSHOT_TTL_MS) {
-      known = latest.snapshot.processes.some((proc) => proc.pid === pid);
-    }
-    if (!known) {
-      known = (await scan({ all: true })).processes.some((proc) => proc.pid === pid);
-    }
+    // Safety rail: only pids the client has actually seen in a fresh scan may
+    // be killed — this endpoint is not a generic remote kill switch. There is
+    // deliberately no rescan fallback: if the pid is missing from the live
+    // snapshot, the client must refresh first.
+    const known =
+      latest !== null &&
+      Date.now() - latest.at < SNAPSHOT_TTL_MS &&
+      latest.snapshot.processes.some((proc) => proc.pid === pid);
     if (!known) {
       return c.json({ error: `pid ${pid} was not in the latest scan — refresh and retry` }, 409);
     }
