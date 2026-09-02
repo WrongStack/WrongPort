@@ -56,7 +56,7 @@ Proje kökünde `wrongport.config.json` (veya `.wrongportrc.json`), yoksa `~/.co
 npm run dev:api      # API'yi tsx watch ile çalıştırır (3789)
 npm run dev:web      # Vite dev sunucusu (5174, /api → 3789 proxy)
 npm run typecheck    # hem node hem web tarafı için tsc
-npm test             # vitest: 10 dosya / 80 birim test (ayrıntı: aşağıdaki Testler)
+npm test             # vitest: 11 dosya / 85 birim test (ayrıntı: aşağıdaki Testler)
 npm run verify       # typecheck + test + build zinciri (tek komut, sırayla)
 npm run build        # tsc + vite build
 ```
@@ -64,7 +64,7 @@ npm run build        # tsc + vite build
 ## Testler
 
 ```bash
-npm test            # vitest run — 10 dosya / 80 test (~2 sn)
+npm test            # vitest run — 11 dosya / 85 test (~2 sn)
 ```
 
 | Dosya | Kapsam |
@@ -79,6 +79,7 @@ npm test            # vitest run — 10 dosya / 80 test (~2 sn)
 | `web/src/components/PortBadges.test.tsx` | Rozet tonlaması (jsdom + Testing Library): wildcard → `*:port` + uyarı tonu, loopback → normal ton, belirli arayüz → uyarı tonu ve "loopback only" olmayan başlık |
 | `web/src/components/PidCell.test.tsx` | PID hücresi: tıklayınca panoya kopyalar ve "copied ✓" gösterir; panonun yokluğunda sessizce bozulur |
 | `web/src/components/HiddenProcessesHint.test.tsx` | Gizli süreç ipucu: 0/negatif sayıda hiçbir şey çizmez, pozitif sayıda sayıyı ve yönlendirmeyi yazar |
+| `web/src/components/KillButton.test.tsx` | İki adımlı güvenlik düğmesi: ilk tık silahlanır (onay etiketi + tehlike tonu), ikinci tık `onConfirm`'i tam bir kez tetikler; blur ve 2,5 sn zaman aşımı silahlanmayı kaldırır, son teslimden hemen önceki onay yine de çalışır |
 
 Notlar:
 
