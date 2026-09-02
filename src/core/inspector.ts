@@ -36,7 +36,7 @@ export interface ListenRow {
   entry: PortEntry;
 }
 
-interface ProcessInfo {
+export interface ProcessInfo {
   name: string;
   command: string;
   user: string;
@@ -90,7 +90,16 @@ async function readListeningSockets(): Promise<ListenRow[]> {
 }
 
 async function readProcessInfos(): Promise<Map<number, ProcessInfo>> {
-  const { stdout } = await execFileAsync('ps', PS_ARGS, { maxBuffer: MAX_BUFFER, timeout: EXEC_TIMEOUT_MS });
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync('ps', PS_ARGS, { maxBuffer: MAX_BUFFER, timeout: EXEC_TIMEOUT_MS }));
+  } catch (err) {
+    const code = exitCodeOf(err);
+    if (code === 'ENOENT') {
+      throw new ScanError('`ps` was not found on PATH.');
+    }
+    throw new ScanError(`ps failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const map = new Map<number, ProcessInfo>();
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
@@ -130,6 +139,35 @@ function matches(
 }
 
 /**
+ * Join raw listening rows with process information. When `ps` missed a pid
+ * that lsof still saw (the process exited mid-scan, or the two calls raced),
+ * fall back to lsof's own COMMAND/USER columns so the row still shows up
+ * instead of being silently dropped.
+ */
+export function joinListenRows(rows: ListenRow[], infos: Map<number, ProcessInfo>): DevProcess[] {
+  const byPid = new Map<number, DevProcess>();
+  for (const row of rows) {
+    const info = infos.get(row.pid);
+    const name = info?.name ?? row.name;
+    const command = info?.command ?? row.name;
+    const user = info?.user ?? row.user;
+    let proc = byPid.get(row.pid);
+    if (!proc) {
+      proc = { pid: row.pid, name, command, user, ports: [], matched: false };
+      byPid.set(row.pid, proc);
+    }
+    if (!proc.ports.some((e) => e.port === row.entry.port && e.address === row.entry.address)) {
+      proc.ports.push(row.entry);
+    }
+  }
+  const all = [...byPid.values()];
+  for (const proc of all) {
+    proc.ports.sort((a, b) => a.port - b.port);
+  }
+  return all;
+}
+
+/**
  * Scan listening TCP ports and join them with full process information.
  * One `lsof` call and one `ps` call per scan.
  */
@@ -138,25 +176,7 @@ export async function scanProcesses(
   options: ScanOptions = {},
 ): Promise<Snapshot> {
   const [rows, infos] = await Promise.all([readListeningSockets(), readProcessInfos()]);
-
-  const byPid = new Map<number, DevProcess>();
-  for (const row of rows) {
-    const info = infos.get(row.pid);
-    if (!info) continue;
-    let proc = byPid.get(row.pid);
-    if (!proc) {
-      proc = { pid: row.pid, name: info.name, command: info.command, user: info.user, ports: [], matched: false };
-      byPid.set(row.pid, proc);
-    }
-    if (!proc.ports.some((e) => e.port === row.entry.port && e.address === row.entry.address)) {
-      proc.ports.push(row.entry);
-    }
-  }
-
-  const all = [...byPid.values()];
-  for (const proc of all) {
-    proc.ports.sort((a, b) => a.port - b.port);
-  }
+  const all = joinListenRows(rows, infos);
 
   const ports = options.ports ?? config.ports;
   const extraInclude = compileOnlyPatterns(options.only ?? []);

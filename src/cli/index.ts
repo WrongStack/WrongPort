@@ -43,11 +43,25 @@ const splitList = (value?: string): string[] | undefined =>
     .map((s) => s.trim())
     .filter(Boolean);
 
-const splitPorts = (value?: string): number[] | undefined =>
-  value
-    ?.split(',')
-    .map((n) => Number(n.trim()))
-    .filter((n) => Number.isInteger(n));
+const splitPorts = (value?: string): number[] | undefined => {
+  if (value === undefined) return undefined;
+  const ports: number[] = [];
+  for (const token of value.split(',')) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+    const port = Number(trimmed);
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      // An empty or bogus list would silently disable the port constraint.
+      throw new Error(`invalid port "${trimmed}" — --ports expects comma-separated integers 1–65535`);
+    }
+    ports.push(port);
+  }
+  if (ports.length === 0) {
+    // An empty --ports list must error, not silently disable the constraint.
+    throw new Error('empty --ports list — expected comma-separated integers 1–65535');
+  }
+  return ports;
+};
 
 async function scanFromOptions(options: ListOptions): Promise<Snapshot> {
   const resolved = resolveConfig(await loadConfig());
@@ -125,9 +139,25 @@ program
     try {
       if (options.watch !== undefined) {
         const seconds = typeof options.watch === 'string' ? Number(options.watch) || 3 : 3;
+        let consecutiveFailures = 0;
         for (;;) {
           console.clear();
-          await runList(options);
+          try {
+            await runList(options);
+            consecutiveFailures = 0;
+            // Recovered from an earlier transient failure: leave no stale error code.
+            process.exitCode = 0;
+          } catch (err) {
+            // A transient scan failure (timeout, busy machine) must not kill
+            // the monitoring loop; bail out only on a persistent streak.
+            fail(err);
+            consecutiveFailures += 1;
+            if (consecutiveFailures >= 5) {
+              console.error(red('✗ scan failed 5 times in a row — stopping watch mode.'));
+              process.exitCode = 1;
+              return;
+            }
+          }
           console.log(dim(`\nRefreshing every ${seconds}s — press Ctrl+C to exit`));
           await sleep(seconds * 1000);
         }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseLsofOutput } from './inspector.js';
+import { joinListenRows, parseLsofOutput, type ProcessInfo } from './inspector.js';
 
 const HEADER = 'COMMAND   PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME';
 
@@ -56,5 +56,46 @@ describe('parseLsofOutput', () => {
 
   it('returns an empty list for empty output', () => {
     expect(parseLsofOutput('')).toEqual([]);
+  });
+});
+
+describe('joinListenRows', () => {
+  const row = (
+    pid: number,
+    port: number,
+    address = `*:${port}`,
+    name = 'node',
+    user = 'ersin',
+  ) => ({ pid, name, user, entry: { port, address } });
+
+  it('prefers ps information when the pid is known', () => {
+    const infos = new Map<number, ProcessInfo>([
+      [1234, { name: 'node', command: 'node server.js', user: 'ersin' }],
+    ]);
+    expect(joinListenRows([row(1234, 3000)], infos)).toEqual([
+      { pid: 1234, name: 'node', command: 'node server.js', user: 'ersin', matched: false, ports: [{ port: 3000, address: '*:3000' }] },
+    ]);
+  });
+
+  it('falls back to lsof columns when ps missed the pid (scan race)', () => {
+    expect(joinListenRows([row(1234, 3000, '*:3000', 'vite', 'ersin')], new Map())).toEqual([
+      { pid: 1234, name: 'vite', command: 'vite', user: 'ersin', matched: false, ports: [{ port: 3000, address: '*:3000' }] },
+    ]);
+  });
+
+  it('merges multiple sockets of one pid into sorted, deduplicated ports', () => {
+    const infos = new Map<number, ProcessInfo>([
+      [7, { name: 'node', command: 'node srv.js', user: 'u' }],
+    ]);
+    const rows = [
+      row(7, 5173, '[::]:5173'),
+      row(7, 3000),
+      row(7, 3000, '*:3000'), // duplicate row from a second socket on the same port
+    ];
+    const [proc] = joinListenRows(rows, infos);
+    expect(proc?.ports).toEqual([
+      { port: 3000, address: '*:3000' },
+      { port: 5173, address: '[::]:5173' },
+    ]);
   });
 });

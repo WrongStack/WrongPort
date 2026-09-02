@@ -3,7 +3,8 @@ import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import { resolveConfig } from '../core/config.js';
-import { createApp } from './app.js';
+import { ScanError } from '../core/inspector.js';
+import { createApp, startServer } from './app.js';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const config = resolveConfig({});
@@ -65,7 +66,7 @@ describe('POST /api/kill safety rails', () => {
 
   it('rejects malformed bodies with 400 before touching any process', async () => {
     const app = createApp(config);
-    for (const body of [undefined, {}, { pid: 'abc' }, { pid: -3 }]) {
+    for (const body of [undefined, {}, { pid: 'abc' }, { pid: -3 }, { pid: 0 }, { pid: 1 }]) {
       const res = await app.request('/api/kill', {
         method: 'POST',
         headers: JSON_HEADERS,
@@ -287,5 +288,88 @@ describe('GET /api/processes query parameters', () => {
     const data = (await res.json()) as { error: string };
     // Exactly the string the web UI surfaces in its error banner via raise().
     expect(data.error).toMatch(/invalid only pattern "\["/);
+  });
+});
+
+describe('POST /api/kill request hardening', () => {
+  it('rejects non-JSON content types with 415 (cross-site form drive-by protection)', async () => {
+    const app = createApp(config);
+    const res = await app.request('/api/kill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ pid: 1234 }),
+    });
+    expect(res.status).toBe(415);
+  });
+
+  it('rejects a non-loopback Host header while loopback-bound (DNS rebinding guard)', async () => {
+    const app = createApp(config);
+    const res = await app.request('/api/health', { headers: { host: 'attacker.example' } });
+    expect(res.status).toBe(403);
+  });
+
+  it('allows loopback Host headers with a port suffix', async () => {
+    const app = createApp(config);
+    const res = await app.request('/api/health', { headers: { host: 'localhost:3789' } });
+    expect(res.status).toBe(200);
+  });
+
+  it('accepts non-loopback Host headers only when loopbackBound is disabled', async () => {
+    const app = createApp(config, undefined, { loopbackBound: false });
+    const health = await app.request('/api/health', { headers: { host: 'attacker.example' } });
+    expect(health.status).toBe(200);
+    // Past the host guard, the normal snapshot rail still applies.
+    const kill = await killRequest(app, { pid: 999_999_999 });
+    expect(kill.status).toBe(409);
+  });
+});
+
+describe('scan failure mapping', () => {
+  it('maps ScanError to 503 with the underlying message', async () => {
+    const app = createApp(config, undefined, {
+      scan: async () => {
+        throw new ScanError('`lsof` was not found on PATH.');
+      },
+    });
+    const res = await app.request('/api/processes');
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: '`lsof` was not found on PATH.' });
+  });
+
+  it('maps unexpected scan errors to 500 JSON', async () => {
+    const app = createApp(config, undefined, {
+      scan: async () => {
+        throw new Error('kaboom');
+      },
+    });
+    const res = await app.request('/api/processes');
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'kaboom' });
+  });
+});
+
+describe('startServer bind handling', () => {
+  it('rejects with a friendly message when the port is already in use', async () => {
+    const blocker = createServer(() => {});
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+    const address = blocker.address();
+    if (address === null || typeof address === 'string') throw new Error('no bound port');
+    try {
+      await expect(startServer({ port: address.port, host: '127.0.0.1' }, config)).rejects.toThrow(
+        /already in use/,
+      );
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
+  it('starts on a port-0 bind, reports the assigned port, and closes cleanly', async () => {
+    const started = await startServer({ port: 0, host: '127.0.0.1' }, config);
+    try {
+      expect(started.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(started.url.endsWith(':0')).toBe(false);
+    } finally {
+      started.close();
+    }
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { killProcess } from './api';
+import { killWithStaleRecovery } from './api';
 import { filterBoxToQuery, SUGGESTED_ONLY_PATTERNS } from './filterQuery';
+import { isLoopbackBinding, isWildcardBinding } from './portAddress';
 import { KillButton } from './components/KillButton';
 import type { DevProcess, PortEntry } from './types';
 import { useProcesses } from './useProcesses';
@@ -38,11 +39,14 @@ export default function App() {
   const kill: KillAction = async (pid, force) => {
     setActionError(null);
     try {
-      await killProcess(pid, force);
-      await refresh();
+      // Survives one stale-snapshot rejection (30s server TTL) by refreshing
+      // and retrying once — keeps kills reliable when polling is off.
+      await killWithStaleRecovery(pid, force, refresh);
     } catch (err) {
       setActionError((err as Error).message);
+      return;
     }
+    await refresh();
   };
 
   return (
@@ -151,7 +155,15 @@ export default function App() {
         {processes.length === 0 ? (
           <EmptyState query={filter} scanned={snapshot?.scannedCount ?? 0} loading={snapshot === null} />
         ) : (
-          <ProcessTable processes={processes} onKill={(pid, force) => void kill(pid, force)} />
+          <>
+            <ProcessTable processes={processes} onKill={(pid, force) => void kill(pid, force)} />
+            {snapshot !== null && snapshot.scannedCount > processes.length && (
+              <p className="mt-3 font-mono text-xs text-muted">
+                {snapshot.scannedCount - processes.length} more listening process(es) hidden by the
+                dev filter — enable "all processes" or add a filter chip to reveal them.
+              </p>
+            )}
+          </>
         )}
       </main>
 
@@ -176,16 +188,61 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 function PortBadges({ ports }: { ports: PortEntry[] }) {
   return (
     <div className="flex flex-wrap gap-1">
-      {ports.map((entry) => (
-        <span
-          key={`${entry.address}:${entry.port}`}
-          title={entry.address}
-          className="rounded-sm border border-primary/30 bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-primary"
-        >
-          {entry.port}
-        </span>
-      ))}
+      {ports.map((entry) => {
+        // Three-way: wildcard binds are network-reachable, loopback is the
+        // only provably unreachable case, and a specific-interface bind (LAN
+        // IP, IPv4-mapped) must not be labelled "loopback only".
+        const tone = isWildcardBinding(entry.address)
+          ? 'exposed'
+          : isLoopbackBinding(entry.address)
+            ? 'loopback'
+            : 'bound';
+        const title =
+          tone === 'exposed'
+            ? `${entry.address} — listening on all interfaces (reachable from the network)`
+            : tone === 'loopback'
+              ? `${entry.address} — loopback only`
+              : `${entry.address} — bound to a specific interface (may be reachable from the network)`;
+        return (
+          <span
+            key={`${entry.address}:${entry.port}`}
+            title={title}
+            className={`rounded-sm border px-1.5 py-0.5 font-mono text-xs ${
+              tone === 'loopback'
+                ? 'border-primary/30 bg-primary/10 text-primary'
+                : 'border-warning/40 bg-warning/10 text-warning'
+            }`}
+          >
+            {tone === 'exposed' ? `*:${entry.port}` : entry.port}
+          </span>
+        );
+      })}
     </div>
+  );
+}
+
+function PidCell({ pid }: { pid: number }) {
+  const [copied, setCopied] = useState(false);
+  const copy = (): void => {
+    navigator.clipboard
+      ?.writeText(String(pid))
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {
+        // Clipboard unavailable (e.g. insecure origin) — the pid stays visible.
+      });
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title={`Copy pid ${pid}`}
+      className="font-mono text-xs text-muted transition-colors duration-150 hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+    >
+      {copied ? 'copied ✓' : pid}
+    </button>
   );
 }
 
@@ -222,7 +279,9 @@ function ProcessTable({ processes, onKill }: { processes: DevProcess[]; onKill: 
                     {proc.command}
                   </div>
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-muted">{proc.pid}</td>
+                <td className="px-3 py-2">
+                  <PidCell pid={proc.pid} />
+                </td>
                 <td className="px-3 py-2 font-mono text-xs text-muted">{proc.user}</td>
                 <td className="px-3 py-2">
                   <div className="flex justify-end gap-1.5">
@@ -250,7 +309,9 @@ function ProcessTable({ processes, onKill }: { processes: DevProcess[]; onKill: 
                 {proc.name}
                 {!proc.matched && <span className="ml-2 text-xs text-warning">unfiltered</span>}
               </span>
-              <span className="font-mono text-xs text-muted">pid {proc.pid}</span>
+              <span className="font-mono text-xs text-muted">
+                pid <PidCell pid={proc.pid} />
+              </span>
             </div>
             <div className="mt-1 truncate font-mono text-xs text-muted" title={proc.command}>
               {proc.command}

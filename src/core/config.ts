@@ -81,8 +81,11 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<WrongPort
     if (obj.include !== undefined) assertStringArray(obj.include, 'include');
     if (obj.exclude !== undefined) assertStringArray(obj.exclude, 'exclude');
     if (obj.ports !== undefined) {
-      if (!Array.isArray(obj.ports) || obj.ports.some((v) => !Number.isInteger(v))) {
-        throw new ConfigError('"ports" must be an array of integers');
+      const portsValid =
+        Array.isArray(obj.ports) &&
+        obj.ports.every((v) => Number.isInteger(v) && v >= 1 && v <= 65_535);
+      if (!portsValid) {
+        throw new ConfigError('"ports" must be an array of integers between 1 and 65535');
       }
     }
     return obj as WrongPortConfig;

@@ -52,5 +52,15 @@ export function useProcesses({ intervalMs, all, only, ports }: UseProcessesOptio
     };
   }, [load, intervalMs]);
 
+  useEffect(() => {
+    // The interval skips hidden-tab ticks, so returning to the tab can wait a
+    // full period — refresh immediately instead.
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [load]);
+
   return { snapshot, error, refreshing, refresh: load };
 }

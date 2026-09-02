@@ -61,6 +61,12 @@ describe('loadConfig', () => {
     await writeFile(path.join(dir, 'wrongport.config.json'), JSON.stringify({ ports: [3000.5] }));
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(ConfigError);
   });
+
+  it('rejects out-of-range ports (a typo must not silently disable the port filter)', async () => {
+    const dir = await makeTempDir();
+    await writeFile(path.join(dir, 'wrongport.config.json'), JSON.stringify({ ports: [0, 70_000, -5] }));
+    await expect(loadConfig(dir)).rejects.toThrow(/between 1 and 65535/);
+  });
 });
 
 describe('resolveConfig', () => {
