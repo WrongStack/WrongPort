@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { killProcess, ProcessNotFoundError, processExists } from './kill.js';
 
 /** Spawn a node process that does nothing until signaled; resolves with its pid. */
@@ -54,5 +54,78 @@ describe('killProcess', () => {
     expect(result.signal).toBe('SIGKILL');
     expect(result.exited).toBe(true);
     expect(processExists(pid)).toBe(false);
+  });
+
+  it('maps a race-lost ESRCH to ProcessNotFoundError', async () => {
+    const pid = await spawnSleeper();
+    // The probe says alive, but the real signal hits ESRCH — the process died
+    // between the existence check and the signal.
+    const spy = vi.spyOn(process, 'kill').mockImplementation((() => {
+      return true;
+    }) as typeof process.kill);
+    let signalled = false;
+    spy.mockImplementation(((pidArgument: number, signalArgument?: NodeJS.Signals | number) => {
+      if (signalArgument === 0) return true;
+      signalled = true;
+      throw Object.assign(new Error('no process'), { code: 'ESRCH' });
+    }) as typeof process.kill);
+    try {
+      await expect(killProcess(pid)).rejects.toBeInstanceOf(ProcessNotFoundError);
+      expect(signalled).toBe(true);
+    } finally {
+      spy.mockRestore();
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('wraps unexpected signal errors', async () => {
+    const pid = await spawnSleeper();
+    const spy = vi.spyOn(process, 'kill').mockImplementation(((pidArgument: number, signalArgument?: NodeJS.Signals | number) => {
+      if (signalArgument === 0) return true;
+      throw new Error('EPERM boom');
+    }) as typeof process.kill);
+    try {
+      await expect(killProcess(pid)).rejects.toThrow(/kill SIGTERM \d+ failed: EPERM boom/);
+    } finally {
+      spy.mockRestore();
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('reports exited=false when the process survives the wait window', async () => {
+    const pid = await spawnSleeper();
+    const spy = vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+    vi.useFakeTimers();
+    try {
+      // The stub swallows the real SIGTERM and keeps reporting the process as
+      // alive, so waitForExit must run out its clock and return false.
+      const pending = killProcess(pid);
+      const result = await vi.advanceTimersByTimeAsync(3_100).then(() => pending);
+      expect(result.exited).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      spy.mockRestore();
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+});
+
+describe('processExists error mapping', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('treats EPERM (process owned by another user) as alive', () => {
+    const spy = vi.spyOn(process, 'kill').mockImplementation((() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    }) as typeof process.kill);
+    expect(processExists(1234)).toBe(true);
+  });
+
+  it('treats other probe errors as not alive', () => {
+    const spy = vi.spyOn(process, 'kill').mockImplementation((() => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    }) as typeof process.kill);
+    expect(processExists(1234)).toBe(false);
   });
 });

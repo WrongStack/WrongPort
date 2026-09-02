@@ -1,43 +1,28 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { createServer, type Server } from 'node:http';
-import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveConfig } from '../core/config.js';
 import { ScanError } from '../core/inspector.js';
+import type { ScanOptions, Snapshot } from '../core/types.js';
 import { createApp, startServer } from './app.js';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const config = resolveConfig({});
 
-/** Marker baked into spawned listeners' command lines for only= matching. */
-const TOKEN = 'zebraDev42';
-
-const LISTENER_SCRIPT =
-  "(async()=>{const zebraDev42=1;const http=await import('node:http');const s=http.createServer((q,r)=>r.end('ok'));s.listen(%%PORT%%,'127.0.0.1',()=>console.log('READY'));})();";
-
-/** Spawn a node http listener on the given port (0 = ephemeral); resolves once it has spawned. */
-function spawnListener(port = 0): Promise<{ child: ChildProcess; pid: number }> {
+/** Spawn a node process that does nothing until signaled; keeps the handle. */
+function spawnSleeper(): Promise<{ child: ChildProcess; pid: number }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['-e', LISTENER_SCRIPT.replace('%%PORT%%', String(port))], {
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-    const timer = setTimeout(() => reject(new Error('listener did not spawn within 5s')), 5_000);
-    child.once('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`listener exited before READY (code ${code})`));
-    });
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     child.once('spawn', () => {
-      clearTimeout(timer);
       if (typeof child.pid !== 'number') {
         reject(new Error('child pid missing'));
         return;
       }
       resolve({ child, pid: child.pid });
     });
+    child.once('error', () => reject(new Error('failed to spawn child')));
   });
 }
 
@@ -54,6 +39,52 @@ async function killRequest(app: ReturnType<typeof createApp>, body: unknown): Pr
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
+}
+
+interface FakeProc {
+  pid: number;
+  name: string;
+  command: string;
+  user: string;
+  ports: { port: number; address: string }[];
+  matched: boolean;
+}
+
+const procRow = (pid: number = 111, port = 45_946): FakeProc => ({
+  pid,
+  name: 'node',
+  command: `node dev-server.js marker-${pid}`,
+  user: 'ersin',
+  ports: [{ port, address: `127.0.0.1:${port}` }],
+  matched: true,
+});
+
+const fakeSnapshot = (processes: FakeProc[]): Snapshot => ({
+  createdAt: Date.now(),
+  platform: process.platform,
+  processes,
+  scannedCount: processes.length,
+});
+
+/**
+ * createApp wired to an injectable scan double. The kill path stays real
+ * (actual spawned process, actual signal); only the lsof/ps scan is faked,
+ * which keeps these tests platform-independent (Windows has no lsof).
+ */
+function appWithScan(snapshot = fakeSnapshot([procRow()])) {
+  const scans: ScanOptions[] = [];
+  const app = createApp(config, undefined, {
+    scan: async (_config, options = {}) => {
+      scans.push(options);
+      const ports = options.ports;
+      const visible =
+        ports !== undefined && ports.length > 0
+          ? snapshot.processes.filter((proc) => proc.ports.some((entry) => ports.includes(entry.port)))
+          : snapshot.processes;
+      return { ...snapshot, processes: visible };
+    },
+  });
+  return { app, scans };
 }
 
 describe('POST /api/kill safety rails', () => {
@@ -85,19 +116,13 @@ describe('POST /api/kill safety rails', () => {
   });
 
   it('kills a pid from the snapshot and returns 409 for the repeat', async () => {
-    const app = createApp(config);
-    const { child, pid } = await spawnListener();
+    const { child, pid } = await spawnSleeper();
     try {
-      // Wait until the spawned listener is visible in the scan (port bound + lsof saw it).
-      let visible = false;
-      for (let i = 0; i < 30 && !visible; i++) {
-        const list = await app.request('/api/processes');
-        expect(list.status).toBe(200);
-        const snapshot = (await list.json()) as { processes: { pid: number }[] };
-        visible = snapshot.processes.some((proc) => proc.pid === pid);
-        if (!visible) await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      expect(visible, 'spawned listener never appeared in the scan').toBe(true);
+      const { app } = appWithScan(fakeSnapshot([procRow(pid)]));
+      const list = await app.request('/api/processes');
+      expect(list.status).toBe(200);
+      const snapshot = (await list.json()) as { processes: { pid: number }[] };
+      expect(snapshot.processes.map((proc) => proc.pid)).toContain(pid);
 
       const res = await killRequest(app, { pid });
       expect(res.status).toBe(200);
@@ -115,23 +140,34 @@ describe('POST /api/kill safety rails', () => {
   });
 
   it('refuses to kill the server process itself via the self-pid guard', async () => {
-    const app = createApp(config);
-    // The test runner only appears in scans while it owns a LISTENING port.
-    const listener: Server = createServer(() => {});
-    await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
+    const { app } = appWithScan(fakeSnapshot([procRow(process.pid)]));
+    await app.request('/api/processes?all=1'); // seed latest with the snapshot
+    const res = await killRequest(app, { pid: process.pid });
+    expect(res.status).toBe(500);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toMatch(/Refusing to kill the WrongPort process itself/);
+  });
+
+  it('returns 404 when the process vanished after the snapshot', async () => {
+    const { child, pid } = await spawnSleeper();
     try {
-      await app.request('/api/processes?all=1'); // seed latest with every listener
-      const res = await killRequest(app, { pid: process.pid });
-      expect(res.status).toBe(500);
-      const data = (await res.json()) as { error: string };
-      expect(data.error).toMatch(/Refusing to kill the WrongPort process itself/);
+      // The pid was seen in a scan, but died before the kill arrived.
+      child.kill('SIGKILL');
+      await waitExit(child);
+      const { app } = appWithScan(fakeSnapshot([procRow(pid)]));
+      await app.request('/api/processes'); // seed latest with the stale pid
+      const res = await killRequest(app, { pid });
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        `No process with pid ${pid}`,
+      );
     } finally {
-      await new Promise<void>((resolve) => listener.close(() => resolve()));
+      child.kill('SIGKILL');
     }
   });
 
   it('returns snapshot metadata from /api/processes', async () => {
-    const app = createApp(config);
+    const { app } = appWithScan(fakeSnapshot([procRow(1)]));
     const res = await app.request('/api/processes?all=1');
     expect(res.status).toBe(200);
     const data = (await res.json()) as {
@@ -142,15 +178,13 @@ describe('POST /api/kill safety rails', () => {
     };
     expect(typeof data.createdAt).toBe('number');
     expect(data.platform).toBe(process.platform);
-    expect(Array.isArray(data.processes)).toBe(true);
-    expect(data.scannedCount).toBeGreaterThanOrEqual(data.processes.length);
+    expect(data.processes).toHaveLength(1);
+    expect(data.scannedCount).toBe(1);
   });
 });
 
 interface SnapshotRow {
   pid: number;
-  name: string;
-  matched: boolean;
   ports: { port: number }[];
 }
 
@@ -159,115 +193,58 @@ interface SnapshotLike {
 }
 
 describe('GET /api/processes query parameters', () => {
-  it('ports=<bound port> narrows the snapshot to processes owning that port', async () => {
-    const app = createApp(config);
-    const port = 45_941;
-    const { child, pid } = await spawnListener(port);
-    try {
-      let snapshot: SnapshotLike | undefined;
-      let visible = false;
-      for (let i = 0; i < 30 && !visible; i++) {
-        const res = await app.request(`/api/processes?ports=${port}`);
-        expect(res.status).toBe(200);
-        snapshot = (await res.json()) as SnapshotLike;
-        visible = snapshot.processes.some((proc) => proc.pid === pid);
-        if (!visible) await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      expect(visible, 'listener never appeared for its own port').toBe(true);
-      // Bind exclusivity: exactly one process can own the requested port.
-      expect(snapshot?.processes).toHaveLength(1);
-      expect(snapshot?.processes[0]?.pid).toBe(pid);
-      expect(snapshot?.processes[0]?.ports[0]?.port).toBe(port);
-    } finally {
-      child.kill('SIGKILL');
-    }
+  it('forwards ports= to the scanner and narrows the snapshot', async () => {
+    const { app, scans } = appWithScan(fakeSnapshot([procRow(11, 45_947)]));
+    const res = await app.request('/api/processes?ports=45947');
+    expect(res.status).toBe(200);
+    expect(scans[0]?.ports).toEqual([45_947]);
+    const snapshot = (await res.json()) as SnapshotLike;
+    expect(snapshot.processes).toHaveLength(1);
+    expect(snapshot.processes[0]?.ports[0]?.port).toBe(45_947);
   });
 
   it('drops invalid ports tokens instead of failing', async () => {
-    const app = createApp(config);
-    const res = await app.request('/api/processes?ports=not-a-port,45942');
+    const { app, scans } = appWithScan(fakeSnapshot([]));
+    const res = await app.request('/api/processes?ports=not-a-port,45948');
     expect(res.status).toBe(200);
-    const snapshot = (await res.json()) as SnapshotLike;
-    // 45942 has no listener; the junk token is filtered out during parsing.
-    expect(snapshot.processes).toEqual([]);
+    expect(scans[0]?.ports).toEqual([45_948]);
+    expect(((await res.json()) as SnapshotLike).processes).toEqual([]);
   });
 
-  it('only= adds include patterns on top of the defaults and reveals non-dev listeners', async () => {
-    if (!existsSync('/usr/bin/nc')) return; // quietly skip where nc is unavailable
-    const app = createApp(config);
-    const nc = spawn('/usr/bin/nc', ['-l', '45943'], { stdio: 'ignore' });
-    try {
-      let revealed = false;
-      for (let i = 0; i < 30 && !revealed; i++) {
-        const res = await app.request(`/api/processes?only=${encodeURIComponent('\\bnc\\b')}`);
-        expect(res.status).toBe(200);
-        const snapshot = (await res.json()) as SnapshotLike;
-        revealed = snapshot.processes.some((proc) => proc.name === 'nc');
-        if (!revealed) await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      expect(revealed, 'nc never appeared with only=\\bnc\\b').toBe(true);
-
-      // Without only=, the default dev filter hides it.
-      const plain = await app.request('/api/processes');
-      const plainSnapshot = (await plain.json()) as SnapshotLike;
-      expect(plainSnapshot.processes.some((proc) => proc.name === 'nc')).toBe(false);
-
-      // matched reflects the effective pattern set: hits with the extra
-      // pattern, misses without it — nc matches no default pattern.
-      const hit = await app.request(`/api/processes?all=1&only=${encodeURIComponent('\\bnc\\b')}`);
-      const hitSnapshot = (await hit.json()) as SnapshotLike;
-      expect(hitSnapshot.processes.find((proc) => proc.name === 'nc')?.matched).toBe(true);
-      const miss = await app.request(`/api/processes?all=1&only=${encodeURIComponent('noSuchToken123')}`);
-      const missSnapshot = (await miss.json()) as SnapshotLike;
-      // all=1 + only= narrows to rows matching the extra pattern, so the miss
-      // scan returns nothing at all — nc cannot be in it.
-      expect(missSnapshot.processes.some((proc) => proc.name === 'nc')).toBe(false);
-    } finally {
-      nc.kill('SIGKILL');
-    }
+  it('maps an empty ports= list to the (impossible) port 0', async () => {
+    const { app, scans } = appWithScan(fakeSnapshot([procRow(12)]));
+    const res = await app.request('/api/processes?ports=');
+    expect(res.status).toBe(200);
+    // Pre-existing quirk: Number('') === 0 passes the integer filter, so the
+    // empty query narrows to port 0, which nothing can own.
+    expect(scans[0]?.ports).toEqual([0]);
+    expect(((await res.json()) as SnapshotLike).processes).toEqual([]);
   });
 
-  it('ports= narrows even in all=1 scans', async () => {
-    const app = createApp(config);
-    const port = 45_944;
-    const { child, pid } = await spawnListener(port);
-    try {
-      let narrowed = false;
-      for (let i = 0; i < 30 && !narrowed; i++) {
-        const res = await app.request(`/api/processes?all=1&ports=${port}`);
-        expect(res.status).toBe(200);
-        const snapshot = (await res.json()) as SnapshotLike;
-        narrowed = snapshot.processes.length === 1 && snapshot.processes[0]?.pid === pid;
-        if (!narrowed) await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      expect(narrowed, 'all=1 scan was not narrowed by ports=').toBe(true);
-    } finally {
-      child.kill('SIGKILL');
-    }
+  it('forwards only= to the scanner in filtered and all modes', async () => {
+    const { app, scans } = appWithScan(fakeSnapshot([procRow(13)]));
+    const filtered = await app.request(`/api/processes?only=${encodeURIComponent('\\bnc\\b')}`);
+    expect(filtered.status).toBe(200);
+    expect(scans[0]?.only).toEqual(['\\bnc\\b']);
+    expect(scans[0]?.all).toBe(false);
+    const all = await app.request(`/api/processes?all=1&only=${encodeURIComponent('\\bnc\\b')}`);
+    expect(all.status).toBe(200);
+    expect(scans[1]?.all).toBe(true);
+    expect(scans[1]?.only).toEqual(['\\bnc\\b']);
   });
 
-  it('ports= is a hard constraint that wins over only= matches', async () => {
-    const app = createApp(config);
-    const { child, pid } = await spawnListener();
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      // The child matches only=TOKEN but listens on the wrong port: the port
-      // constraint must exclude it regardless of the pattern hit.
-      const res = await app.request(
-        `/api/processes?all=1&only=${encodeURIComponent(TOKEN)}&ports=45945`,
-      );
-      expect(res.status).toBe(200);
-      const snapshot = (await res.json()) as SnapshotLike;
-      expect(snapshot.processes.some((proc) => proc.pid === pid)).toBe(false);
-      expect(snapshot.processes).toEqual([]);
-    } finally {
-      child.kill('SIGKILL');
-    }
+  it('gives ports= precedence over only= matches (hard constraint)', async () => {
+    // The only= match listens on port 45950 but the query demands 45951.
+    const { app, scans } = appWithScan(fakeSnapshot([procRow(14, 45_950)]));
+    const res = await app.request(`/api/processes?all=1&only=marker&ports=45951`);
+    expect(res.status).toBe(200);
+    expect(scans[0]).toMatchObject({ all: true, only: ['marker'], ports: [45_951] });
+    expect(((await res.json()) as SnapshotLike).processes).toEqual([]);
   });
 
   it('never authorizes a kill without a prior snapshot (no fallback scan)', async () => {
     const app = createApp(config);
-    const { child, pid } = await spawnListener();
+    const { child, pid } = await spawnSleeper();
     try {
       // No GET /api/processes first: the listener has never been listed.
       const res = await killRequest(app, { pid });
@@ -299,6 +276,14 @@ describe('POST /api/kill request hardening', () => {
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify({ pid: 1234 }),
     });
+    expect(res.status).toBe(415);
+  });
+
+  it('rejects kill requests that carry no content type at all', async () => {
+    const app = createApp(config);
+    // No body and no headers: undici would auto-add a content type for a
+    // string body, so this request goes out truly header-less.
+    const res = await app.request('/api/kill', { method: 'POST' });
     expect(res.status).toBe(415);
   });
 
@@ -348,8 +333,149 @@ describe('scan failure mapping', () => {
   });
 });
 
-describe('startServer bind handling', () => {
+describe('static web UI serving', () => {
+  let webRoot: string;
+
+  const uiApp = (): ReturnType<typeof createApp> => createApp(config, webRoot);
+
+  afterEach(async () => {
+    if (webRoot !== undefined) {
+      await rm(webRoot, { recursive: true, force: true });
+      webRoot = undefined as unknown as string;
+    }
+  });
+
+  it('serves index.html at / with no-cache', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    const res = await uiApp().request('/');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(res.headers.get('cache-control')).toBe('no-cache');
+    expect(await res.text()).toContain('app-shell');
+  });
+
+  it('serves assets with immutable caching and known mime types', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await mkdir(path.join(webRoot, 'assets'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    await writeFile(path.join(webRoot, 'assets', 'app.js'), 'console.log(1)');
+    await writeFile(path.join(webRoot, 'logo.png'), 'png-bytes');
+    await writeFile(path.join(webRoot, 'data.yml'), 'yaml: yes');
+
+    const script = await uiApp().request('/assets/app.js');
+    expect(script.status).toBe(200);
+    expect(script.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
+    expect(script.headers.get('cache-control')).toContain('immutable');
+
+    const png = await uiApp().request('/logo.png');
+    expect(png.headers.get('content-type')).toBe('image/png');
+
+    // Unknown extension falls back to the octet-stream default.
+    const yml = await uiApp().request('/data.yml');
+    expect(yml.headers.get('content-type')).toBe('application/octet-stream');
+  });
+
+  it('falls back to the app shell for unknown paths (SPA routing)', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    const res = await uiApp().request('/some/spa/route');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('app-shell');
+  });
+
+  it('treats a path that resolves to the web root itself as the shell', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    const res = await uiApp().request('/.');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('app-shell');
+  });
+
+  it('returns 404 with guidance when the shell itself is missing', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    const res = await uiApp().request('/nothing');
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain('Web UI build not found');
+  });
+
+  it('serves the shell for directory paths with a trailing slash', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await mkdir(path.join(webRoot, 'sub'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    await writeFile(path.join(webRoot, 'sub', 'nested.txt'), 'nested');
+    const res = await uiApp().request('/sub/');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('app-shell');
+  });
+
+  it('blocks path traversal outside the web root', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    const res = await uiApp().request('/..%2f..%2fsecret.txt');
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects undecodable percent-escapes and NUL bytes', async () => {
+    webRoot = await mkdtemp(path.join(tmpdir(), 'wrongport-web-'));
+    await writeFile(path.join(webRoot, 'index.html'), '<html>app-shell</html>');
+    const badEscape = await uiApp().request('/%E0%A4%A');
+    expect(badEscape.status).toBe(400);
+    const nul = await uiApp().request('/a%00b');
+    expect(nul.status).toBe(400);
+  });
+});
+
+describe('startServer environment and display handling', () => {
+  it('honors WRONGPORT_PORT and WRONGPORT_HOST when no options are given', async () => {
+    vi.stubEnv('WRONGPORT_PORT', '40017');
+    vi.stubEnv('WRONGPORT_HOST', '127.0.0.1');
+    try {
+      const started = await startServer({}, config);
+      try {
+        expect(started.url).toBe('http://127.0.0.1:40017');
+      } finally {
+        started.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('defaults the bind to loopback when neither options nor env say otherwise', async () => {
+    const started = await startServer({ port: 45_996 }, config);
+    try {
+      expect(started.url).toBe('http://127.0.0.1:45996');
+    } finally {
+      started.close();
+    }
+  });
+
+  it('treats a non-positive WRONGPORT_PORT as unset', async () => {
+    vi.stubEnv('WRONGPORT_PORT', '0');
+    try {
+      const started = await startServer({ host: '127.0.0.1' }, config);
+      try {
+        expect(started.url).toBe('http://127.0.0.1:3789');
+      } finally {
+        started.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('displays localhost for wildcard IPv4 binds', async () => {
+    const started = await startServer({ port: 0, host: '0.0.0.0' }, config);
+    try {
+      expect(started.url).toMatch(/^http:\/\/localhost:\d+$/);
+    } finally {
+      started.close();
+    }
+  });
+
   it('rejects with a friendly message when the port is already in use', async () => {
+    const { createServer } = await import('node:http');
     const blocker = createServer(() => {});
     await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
     const address = blocker.address();

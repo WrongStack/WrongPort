@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PidCell } from './PidCell';
 
@@ -37,6 +37,35 @@ describe('PidCell', () => {
     render(<PidCell pid={7} />);
     fireEvent.click(screen.getByText('7'));
     expect(screen.getByText('7')).toBeTruthy();
+    expect(screen.queryByText('copied ✓')).toBeNull();
+  });
+
+  it('clears the confirmation flash after a moment', async () => {
+    vi.useFakeTimers();
+    try {
+      stubClipboard(vi.fn(() => Promise.resolve()));
+      render(<PidCell pid={4242} />);
+      fireEvent.click(screen.getByText('4242'));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText('copied ✓')).toBeTruthy();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_200);
+      });
+      expect(screen.queryByText('copied ✓')).toBeNull();
+      expect(screen.getByText('4242')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays quiet when the clipboard write rejects', async () => {
+    stubClipboard(vi.fn(() => Promise.reject(new Error('denied'))));
+    render(<PidCell pid={99} />);
+    fireEvent.click(screen.getByText('99'));
+    await act(async () => {});
+    expect(screen.getByText('99')).toBeTruthy();
     expect(screen.queryByText('copied ✓')).toBeNull();
   });
 });

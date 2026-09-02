@@ -16,6 +16,12 @@ describe('isWildcardBinding', () => {
     expect(isWildcardBinding('::1:3000')).toBe(false);
   });
 
+  it('handles addresses without a port suffix', () => {
+    expect(isWildcardBinding('*')).toBe(true);
+    expect(isLoopbackBinding('127.0.0.1')).toBe(true);
+    expect(isLoopbackBinding('*')).toBe(false);
+  });
+
   it('parses by host, not by substring', () => {
     // "[::1]" contains "[::" but is loopback — must not be flagged.
     expect(isWildcardBinding('[::1]:3000')).toBe(false);

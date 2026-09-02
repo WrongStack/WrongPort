@@ -37,6 +37,13 @@ describe('loadConfig', () => {
     await expect(loadConfig(dir)).resolves.toEqual({ exclude: ['\\bx\\b'] });
   });
 
+  it('rejects a config file whose root is not a JSON object', async () => {
+    const dir = await makeTempDir();
+    await writeFile(path.join(dir, 'wrongport.config.json'), JSON.stringify([1, 2, 3]));
+    await expect(loadConfig(dir)).rejects.toThrow(ConfigError);
+    await expect(loadConfig(dir)).rejects.toThrow(/must contain a JSON object/);
+  });
+
   it('prefers wrongport.config.json over .wrongportrc.json', async () => {
     const dir = await makeTempDir();
     await writeFile(path.join(dir, 'wrongport.config.json'), JSON.stringify({ include: ['\\ba\\b'] }));

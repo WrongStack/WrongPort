@@ -43,6 +43,13 @@ describe('fetchProcesses', () => {
       fetchProcesses({ all: false, only: '[', signal: new AbortController().signal }),
     ).rejects.toThrow(/invalid only pattern/);
   });
+
+  it('falls back to the bare status when the body carries no error message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ unexpected: true }, 500)));
+    await expect(
+      fetchProcesses({ all: false, signal: new AbortController().signal }),
+    ).rejects.toThrow(/HTTP 500/);
+  });
 });
 
 describe('killWithStaleRecovery', () => {
