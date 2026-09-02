@@ -115,7 +115,7 @@ const program = new Command();
 program
   .name('wrongport')
   .description('See which dev processes own which ports — list, watch, kill. Web UI: `wrongport serve`.')
-  .version('0.1.0');
+  .version('0.2.0');
 
 program
   .action(async () => {
