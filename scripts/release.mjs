@@ -113,6 +113,11 @@ if (lock.packages !== undefined && lock.packages[''] !== undefined) {
 }
 
 say(`version ${pkg.version} → ${next} (${part})`);
+// Stamp the new version before writing — bumpVersion() only computes it.
+// Without this assignment package.json lands unchanged while the lockfile
+// and CLI banner move (caught by the CI version-sync test on both the
+// v0.2.1 and v0.2.2 release commits).
+pkg.version = next;
 
 // ── 4. write, commit, tag ────────────────────────────────────────────────────
 if (dryRun) {
@@ -121,6 +126,11 @@ if (dryRun) {
   writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
   writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
   writeFileSync(cliPath, nextCliSource);
+  // Cheap post-write invariant: never commit a half-bumped release again.
+  const written = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  if (written.version !== next) {
+    die(`package.json version is still "${written.version}" after the bump — expected "${next}"`);
+  }
   git(['add', 'package.json', 'package-lock.json', 'src/cli/index.ts']);
   git(['commit', '-m', `chore(release): v${next}`]);
   git(['tag', `v${next}`]);
