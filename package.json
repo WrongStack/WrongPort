@@ -19,7 +19,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "verify": "npm run typecheck && npm run test:coverage && npm run build"
+    "verify": "npm run typecheck && npm run test:coverage && npm run build",
+    "release": "node scripts/release.mjs",
+    "release:dry": "node scripts/release.mjs --dry-run"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
