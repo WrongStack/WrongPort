@@ -1,0 +1,18 @@
+.wrongstack/
+!/.wrongstack/
+/.wrongstack/*
+!/.wrongstack/project.json
+
+# WrongPort build artifacts
+node_modules/
+dist/
+web-dist/
+
+# WrongPort
+node_modules/
+dist/
+web-dist/
+
+# Tool state
+.temp_files/
+.design/
