@@ -58,36 +58,59 @@ npm link             # optional: global `wrongport` command
 npm run dev:api      # runs the API with tsx watch (3789)
 npm run dev:web      # Vite dev server (5174, /api → 3789 proxy)
 npm run typecheck    # tsc for both the node and web sides
-npm test             # vitest: 11 files / 85 unit tests (details: Tests below)
-npm run verify       # typecheck + test + build chain (one command, in order)
+npm test             # vitest: 17 files / 194 unit tests (details: Tests below)
+npm run test:coverage  # same suite + v8 coverage report (100% gate)
+npm run verify       # typecheck + coverage-gated tests + build (one command, in order)
+npm run release      # release pipeline — see Release below
 npm run build        # tsc + vite build
 ```
+
+## Release
+
+```bash
+npm run release            # verify → version bump (patch) → commit + tag v*
+npm run release -- minor   # major | minor | patch
+npm run release -- --push  # also push the branch and tag
+npm run release:dry        # plan only: no writes, no commit, no tag
+```
+
+The script refuses a dirty working tree; outside `--dry-run` it also refuses any branch but `main`. It then runs `npm run verify` — typecheck, tests and the 100% coverage gate included — then bumps `package.json`, `package-lock.json` and the CLI banner in `src/cli/index.ts` in lockstep, commits `chore(release): vX.Y.Z` and tags `vX.Y.Z`. Nothing leaves the machine without `--push`.
 
 ## Tests
 
 ```bash
-npm test            # vitest run — 11 files / 85 tests (~2s)
+npm test               # vitest run — 17 files / 194 tests (~2.5s)
+npm run test:coverage  # same suite + v8 coverage report
 ```
+
+Coverage is enforced at **100% statements / branches / functions / lines** in `vitest.config.ts`; a drop below 100 fails the suite, so it can only ratchet up. Interface-only `types.ts` files and CSS carry no runtime statements and are excluded from the report.
 
 | File | Coverage |
 | --- | --- |
-| `src/core/inspector.test.ts` | lsof output parsing: rows with/without the ` (LISTEN)` suffix, IPv4/IPv6 binds, skipping header/broken/portless rows, empty output |
-| `src/core/config.test.ts` | Config discovery and validation: file precedence (`wrongport.config.json` > `.wrongportrc.json` > `~/.config`), broken JSON and type errors → `ConfigError`, default include/exclude merge (WrongPort itself is always excluded), invalid regex rejection |
-| `src/core/kill.test.ts` | Kill safety: invalid pid rejection (0, 1, negative, NaN), self-pid guard, missing pid → `ProcessNotFoundError`, real child-process SIGTERM and SIGKILL flows |
-| `src/server/app.test.ts` | API safety rails (via hono `app.request`): malformed body → 400, pid unseen in scans → 409, visible process → 200 + real exit + repeat kill → 409, self-pid → 500; query params: `ports=` narrowing (hard constraint in every mode incl. `all=1`) and broken-token tolerance, `only=` revealing processes hidden by the default filter, `only`+`ports` precedence, `matched` flag, invalid `only` pattern → 400 + message; request hardening: non-JSON content-type kill → 415, foreign `Host` while loopback-bound → 403; error mapping: `ScanError` → 503, unexpected → 500; `startServer`: EADDRINUSE → friendly message, port 0 → real port |
+| `src/core/inspector.test.ts` | lsof output parsing: rows with/without the ` (LISTEN)` suffix, IPv4/IPv6 binds, skipping header/broken/portless/out-of-range rows, empty output; `joinListenRows`: ps preference, scan-race fallback, port merging/dedup; `scanProcesses` selection semantics against a **stubbed `execFile`** (no real lsof/ps): default dev filter, additive `only=`, hard `ports=` constraint incl. `all=1`, config-ports fallback, exclude patterns, `matched` flags, sort + pid tiebreak, and every `ScanError` mapping (missing lsof/ps, exit 1 = empty result, generic and non-Error failures) |
+| `src/core/config.test.ts` | Config discovery and validation: file precedence (`wrongport.config.json` > `.wrongportrc.json` > `~/.config`), broken JSON and type errors → `ConfigError`, non-object config roots rejected, default include/exclude merge (WrongPort itself is always excluded), invalid regex rejection |
+| `src/core/kill.test.ts` | Kill safety: invalid pid rejection (0, 1, negative, NaN), self-pid guard, missing pid → `ProcessNotFoundError`, real child-process SIGTERM and SIGKILL flows, EPERM/ESRCH probe mapping, wrapped signal failures, wait-timeout → `exited: false` |
+| `src/server/app.test.ts` | API safety rails via hono `app.request` with an **injectable scan double** — kill paths stay real (spawned processes + real signals): malformed body → 400, unseen pid → 409, snapshot kill → 200 + real exit + repeat → 409, self-pid → 500, vanished-pid → 404; query params forwarded (`ports=` hard constraint incl. `all=1`, additive `only=`, empty/broken tokens, `ports=` empty → port 0 quirk); invalid `only=` → 400 + message; hardening: missing/non-JSON content type → 415, foreign `Host` → 403; error mapping: `ScanError` → 503, unexpected → 500; static UI serving: SPA fallback, trailing-slash directories, immutable `/assets/`, mime map, traversal → 403, NUL/bad-escape → 400, missing shell → 404; `startServer`: EADDRINUSE, port 0, `WRONGPORT_PORT`/`WRONGPORT_HOST` env precedence, `0.0.0.0`/`::` → localhost display |
+| `src/server/app.server.test.ts` | `startServer` bind handling with a mocked `serve`: EACCES → privileges hint, generic bind errors, `address()` fallback, wildcard display, stray post-listen socket errors swallowed |
+| `src/cli/index.test.ts` | the full CLI through commander with mocked I/O: bare command = `ls`, `--json`, `--only/--ports/--all` forwarding, `--ports` validation errors, watch mode (transient failures tolerated, 5-streak stop, exit-code recovery, 3s cadence incl. bare/non-numeric values), `kill` (pid/port/`-a` targeting, y/yes/decline confirmations, `ProcessNotFoundError` vs generic vs non-Error failures), `serve` (missing web build warning, port/host options, per-platform `--open` spawn + failure tolerance), main-module guard (incl. symlinked-bin realpath), CLI version ↔ package.json sync |
+| `src/cli/table.test.ts` | table renderer: header/rows/footer, narrow-stdout sizing, name/command truncation, hidden-by-filter and empty-machine states, ANSI helpers |
 | `web/src/filterQuery.test.ts` | UI filter box → server param mapping: number/number list → `ports`, any other text → `only` (regex), empty input → no params |
-| `web/src/api.test.ts` | Client API layer: query param building, surfacing server error messages, 409 "stale snapshot" kill recovery (refresh + retry once; no retry for other errors) |
-| `web/src/portAddress.test.ts` | Wildcard bind (`*`, `0.0.0.0`, `[::]`, `::`) vs loopback/LAN address distinction — port badge coloring builds on it |
+| `web/src/api.test.ts` | Client API layer: query param building, surfacing server error messages, bare-status fallback when the body carries no `error`, 409 "stale snapshot" kill recovery (refresh + retry once; no retry for other errors) |
+| `web/src/portAddress.test.ts` | Wildcard bind (`*`, `0.0.0.0`, `[::]`, `::`) vs loopback/LAN address distinction incl. colon-less addresses — port badge coloring builds on it |
+| `web/src/useProcesses.test.tsx` | data hook: 250 ms debounce, interval polling on visible tabs, hidden-tab tick skipping + ignored visibilitychange, refresh on becoming visible, filter-change refetch, error surfacing vs `AbortError` swallowing, refresh aborts the in-flight request, unmount abort |
+| `web/src/App.test.tsx` | App shell: counts/platform, table + mobile card layouts, unfiltered badge, empty states (loading / idle / filtered / hidden hint), filter debounce → `only=`/`ports=`, all-toggle, cadence select, refresh button state, suggestion chips, server + action error banners with dismiss, two-step kill (`kill` and `-9`) in both layouts with post-kill refresh |
+| `web/src/main.test.tsx` | bootstrap mounts the app into `#root`; throws when `#root` is missing |
 | `web/src/components/PortBadges.test.tsx` | Badge tones (jsdom + Testing Library): wildcard → `*:port` + warning tone, loopback → normal tone, specific interface → warning tone with a non-"loopback only" title |
-| `web/src/components/PidCell.test.tsx` | PID cell: click copies to clipboard and shows "copied ✓"; degrades silently when the clipboard is unavailable |
+| `web/src/components/PidCell.test.tsx` | PID cell: click copies to clipboard and shows "copied ✓"; the flash clears after 1.2 s; degrades silently when the clipboard is unavailable or rejects |
 | `web/src/components/HiddenProcessesHint.test.tsx` | Hidden-process hint: renders nothing for 0/negative counts, renders the count and guidance for positive ones |
 | `web/src/components/KillButton.test.tsx` | Two-step safety button: first click arms (confirm label + danger tone), second click fires `onConfirm` exactly once; blur and the 2.5s timeout disarm, confirming just before the deadline still works |
 
 Notes:
 
 - Kill and API tests use **only throwaway child processes spawned by the test itself**; thanks to the snapshot-membership constraint they cannot touch other processes on the machine.
-- Tests that scan make real `lsof`/`ps` calls; macOS or Linux is therefore required.
-- The `lsof`/`ps` calls in `src/core/inspector.ts` are guarded by a 5s timeout; a hung subprocess surfaces as `ScanError`, not a hanging test.
+- Scans are faked at the `execFile`/`scanProcesses` boundary, so the suite is platform-independent (macOS, Linux, Windows). `lsof` is only required to **run** WrongPort itself, not its tests.
+- The `useProcesses` identity guard protects the `refreshing` flag only — a late response still overwrites the snapshot (pinned by a test).
+- `GET /api/processes?ports=` with an empty value parses as port `0`, which nothing can own — pinned as a documented quirk.
 - The UI filter box is wired server-side (250 ms debounce): numbers → `ports=`, any other text → `only=`. The old client-side substring filter was removed — the difference: client-side could only narrow the rows the server had already returned; the server-side filter (`only`) can reveal processes hidden by the default dev filter, while `ports=` is a hard constraint in every mode including `all=1`. An invalid `only` pattern (e.g. `[`) returns 400 + an explanatory message, shown in the UI error banner.
 - `ls --watch` keeps looping through one-off scan failures (timeout, busy machine); 5 consecutive failures stop watch mode, and the exit code is cleared after a recovery.
 - UI component tests run with jsdom + Testing Library via a per-file `// @vitest-environment jsdom` directive — the global environment stays 'node' so server tests don't slow down. `@testing-library/react` and `jsdom` are devDependencies.
