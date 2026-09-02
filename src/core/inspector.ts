@@ -7,6 +7,10 @@ const execFileAsync = promisify(execFile);
 
 const LSOF_ARGS = ['-w', '-nP', '-iTCP', '-sTCP:LISTEN'];
 const PS_ARGS = ['-axo', 'pid=,user=,command='];
+const NETSTAT_ARGS = ['-ano', '-p', 'tcp'];
+/** Windows process table: pid, image name and full command line as CSV. */
+const CIM_PROPS =
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Csv -NoTypeInformation';
 const MAX_BUFFER = 16 * 1024 * 1024;
 /** Hard ceiling per subprocess; a hung lsof/ps must surface as ScanError, not block forever. */
 const EXEC_TIMEOUT_MS = 5_000;
@@ -73,6 +77,28 @@ export function parseLsofOutput(stdout: string): ListenRow[] {
   return rows;
 }
 
+/** Parse `netstat -ano -p tcp` output: TCP rows in LISTENING state only. */
+export function parseNetstatOutput(stdout: string): ListenRow[] {
+  const rows: ListenRow[] = [];
+  for (const line of stdout.split('\n')) {
+    const cols = line.trim().split(/\s+/);
+    // Rows look like `TCP  0.0.0.0:3000  0.0.0.0:0  LISTENING  4242`; IPv6
+    // locals look like `[::]:3000`. Header, UDP and non-LISTEN rows all skip.
+    if (cols.length < 5 || cols[0]?.toUpperCase() !== 'TCP') continue;
+    if (cols[3]?.toUpperCase() !== 'LISTENING') continue;
+    const local = cols[1] as string;
+    const colon = local.lastIndexOf(':');
+    if (colon === -1) continue;
+    const port = Number(local.slice(colon + 1));
+    const pid = Number(cols[4]);
+    if (!Number.isInteger(port) || port <= 0 || port > 65_535) continue;
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    // netstat carries no process names; the CIM table joins those in later.
+    rows.push({ pid, name: '', user: '', entry: { port, address: local } });
+  }
+  return rows;
+}
+
 async function readListeningSockets(): Promise<ListenRow[]> {
   let stdout: string;
   try {
@@ -118,6 +144,86 @@ async function readProcessInfos(): Promise<Map<number, ProcessInfo>> {
     map.set(pid, { name: displayBaseName(command), command, user });
   }
   return map;
+}
+
+/** Split one CSV line into fields, honoring quotes and doubled-quote escapes. */
+function splitCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i] as string;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      fields.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+/** Parse `Get-CimInstance Win32_Process` CSV output into the process table. */
+export function parseCimProcessCsv(stdout: string): Map<number, ProcessInfo> {
+  const map = new Map<number, ProcessInfo>();
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue;
+    // PowerShell emits CRLF endings; a trailing \r would corrupt the last CSV
+    // field (an empty command would become the truthy string "\r").
+    const record = line.replace(/\r$/, '');
+    // The header line makes Number('ProcessId') NaN and skips; CommandLine may
+    // be empty, so the image name doubles as the command for display purposes.
+    const [pidField, nameField = '', commandField = ''] = splitCsvLine(record);
+    const pid = Number(pidField);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    const name = nameField.replace(/\.exe$/i, '');
+    map.set(pid, { name, command: commandField || name, user: '' });
+  }
+  return map;
+}
+
+async function readListeningSocketsNetstat(): Promise<ListenRow[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync('netstat', NETSTAT_ARGS, { maxBuffer: MAX_BUFFER, timeout: EXEC_TIMEOUT_MS }));
+  } catch (err) {
+    if (exitCodeOf(err) === 'ENOENT') {
+      throw new ScanError('`netstat` was not found on PATH.');
+    }
+    throw new ScanError(`netstat failed: ${(err as Error).message}`);
+  }
+  return parseNetstatOutput(stdout);
+}
+
+async function readProcessInfosCim(): Promise<Map<number, ProcessInfo>> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', CIM_PROPS],
+      { maxBuffer: MAX_BUFFER, timeout: EXEC_TIMEOUT_MS },
+    ));
+  } catch (err) {
+    if (exitCodeOf(err) === 'ENOENT') {
+      throw new ScanError('`powershell` was not found on PATH.');
+    }
+    throw new ScanError(`powershell failed: ${(err as Error).message}`);
+  }
+  return parseCimProcessCsv(stdout);
 }
 
 function displayBaseName(command: string): string {
@@ -173,13 +279,18 @@ export function joinListenRows(rows: ListenRow[], infos: Map<number, ProcessInfo
 
 /**
  * Scan listening TCP ports and join them with full process information.
- * One `lsof` call and one `ps` call per scan.
+ * POSIX uses one `lsof` call plus one `ps` call; Windows uses one `netstat`
+ * call plus one `Get-CimInstance` PowerShell call.
  */
 export async function scanProcesses(
   config: ResolvedConfig,
   options: ScanOptions = {},
 ): Promise<Snapshot> {
-  const [rows, infos] = await Promise.all([readListeningSockets(), readProcessInfos()]);
+  const windows = process.platform === 'win32';
+  const [rows, infos] = await Promise.all([
+    windows ? readListeningSocketsNetstat() : readListeningSockets(),
+    windows ? readProcessInfosCim() : readProcessInfos(),
+  ]);
   const all = joinListenRows(rows, infos);
 
   const ports = options.ports ?? config.ports;

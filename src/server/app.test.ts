@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -451,9 +452,18 @@ describe('startServer environment and display handling', () => {
     }
   });
 
-  it('treats a non-positive WRONGPORT_PORT as unset', async () => {
+  it('treats a non-positive WRONGPORT_PORT as unset', async (ctx) => {
     vi.stubEnv('WRONGPORT_PORT', '0');
     try {
+      // A running WrongPort serve (or any service) on the default port would
+      // fail this bind through no fault of the fallback logic — probe first
+      // and skip when 3789 is taken (CI always has it free).
+      const defaultPortFree = await new Promise<boolean>((resolve) => {
+        const probe = createServer();
+        probe.once('error', () => resolve(false));
+        probe.listen(3789, '127.0.0.1', () => probe.close(() => resolve(true)));
+      });
+      if (!defaultPortFree) return ctx.skip();
       const started = await startServer({ host: '127.0.0.1' }, config);
       try {
         expect(started.url).toBe('http://127.0.0.1:3789');

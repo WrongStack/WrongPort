@@ -67,6 +67,20 @@ describe('startServer bind handling (serve mocked)', () => {
     started.close();
   });
 
+  it('falls back to the default port when WRONGPORT_PORT is not positive', async () => {
+    // Mocked serve: no real bind, so this holds even while a dev `serve`
+    // occupies 3789 on the host machine (the real-bind variant skips there).
+    vi.stubEnv('WRONGPORT_PORT', '0');
+    try {
+      fakeServer({ address: { port: 3789 } });
+      const started = await startServer({ host: '127.0.0.1' }, config);
+      expect(started.url).toBe('http://127.0.0.1:3789');
+      started.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('swallows stray socket errors raised after a successful bind', async () => {
     const server = fakeServer({});
     const started = await startServer({ port: 45_998, host: '127.0.0.1' }, config);

@@ -58,7 +58,7 @@ npm link             # optional: global `wrongport` command
 npm run dev:api      # runs the API with tsx watch (3789)
 npm run dev:web      # Vite dev server (5174, /api → 3789 proxy)
 npm run typecheck    # tsc for both the node and web sides
-npm test             # vitest: 17 files / 194 unit tests (details: Tests below)
+npm test             # vitest: 17 files / 202 unit tests (details: Tests below)
 npm run test:coverage  # same suite + v8 coverage report (100% gate)
 npm run verify       # typecheck + coverage-gated tests + build (one command, in order)
 npm run release      # release pipeline — see Release below
@@ -81,7 +81,7 @@ Pushing the tag (`npm run release -- --push`) triggers the GitHub Actions `Relea
 ## Tests
 
 ```bash
-npm test               # vitest run — 17 files / 194 tests (~2.5s)
+npm test               # vitest run — 17 files / 202 tests (~2.5s)
 npm run test:coverage  # same suite + v8 coverage report
 ```
 
@@ -89,7 +89,7 @@ Coverage is enforced at **100% statements / branches / functions / lines** in `v
 
 | File | Coverage |
 | --- | --- |
-| `src/core/inspector.test.ts` | lsof output parsing: rows with/without the ` (LISTEN)` suffix, IPv4/IPv6 binds, skipping header/broken/portless/out-of-range rows, empty output; `joinListenRows`: ps preference, scan-race fallback, port merging/dedup; `scanProcesses` selection semantics against a **stubbed `execFile`** (no real lsof/ps): default dev filter, additive `only=`, hard `ports=` constraint incl. `all=1`, config-ports fallback, exclude patterns, `matched` flags, sort + pid tiebreak, and every `ScanError` mapping (missing lsof/ps, exit 1 = empty result, generic and non-Error failures) |
+| `src/core/inspector.test.ts` | lsof output parsing: rows with/without the ` (LISTEN)` suffix, IPv4/IPv6 binds, skipping header/broken/portless/out-of-range rows, empty output; `joinListenRows`: ps preference, scan-race fallback, port merging/dedup; `scanProcesses` selection semantics against a **stubbed `execFile`** (no real lsof/ps): default dev filter, additive `only=`, hard `ports=` constraint incl. `all=1`, config-ports fallback, exclude patterns, `matched` flags, sort + pid tiebreak, and every `ScanError` mapping (missing lsof/ps, exit 1 = empty result, generic and non-Error failures); **Windows path**: `netstat` + `Get-CimInstance` CSV parsing (CRLF-safe, quoted/unquoted fields, bad pids), win32 scan selection with `only=`/`ports=`, netstat/powershell ENOENT + failure mappings |
 | `src/core/config.test.ts` | Config discovery and validation: file precedence (`wrongport.config.json` > `.wrongportrc.json` > `~/.config`), broken JSON and type errors → `ConfigError`, non-object config roots rejected, default include/exclude merge (WrongPort itself is always excluded), invalid regex rejection |
 | `src/core/kill.test.ts` | Kill safety: invalid pid rejection (0, 1, negative, NaN), self-pid guard, missing pid → `ProcessNotFoundError`, real child-process SIGTERM and SIGKILL flows, EPERM/ESRCH probe mapping, wrapped signal failures, wait-timeout → `exited: false` |
 | `src/server/app.test.ts` | API safety rails via hono `app.request` with an **injectable scan double** — kill paths stay real (spawned processes + real signals): malformed body → 400, unseen pid → 409, snapshot kill → 200 + real exit + repeat → 409, self-pid → 500, vanished-pid → 404; query params forwarded (`ports=` hard constraint incl. `all=1`, additive `only=`, empty/broken tokens, `ports=` empty → port 0 quirk); invalid `only=` → 400 + message; hardening: missing/non-JSON content type → 415, foreign `Host` → 403; error mapping: `ScanError` → 503, unexpected → 500; static UI serving: SPA fallback, trailing-slash directories, immutable `/assets/`, mime map, traversal → 403, NUL/bad-escape → 400, missing shell → 404; `startServer`: EADDRINUSE, port 0, `WRONGPORT_PORT`/`WRONGPORT_HOST` env precedence, `0.0.0.0`/`::` → localhost display |
@@ -128,4 +128,4 @@ Notes:
 | `GET /api/processes?all=1` | Snapshot (JSON); `only`, `ports` query params optional; invalid `only` pattern → 400 + message; scan failure → 503 + `{error}`, unexpected error → 500 + `{error}` |
 | `POST /api/kill` | Body: `{"pid": 1234, "force": false}`; `Content-Type: application/json` required (otherwise 415); when loopback-bound the `Host` header is validated (foreign → 403); pid ≤ 1 → 400; pid missing from the last scan window → 409 |
 
-Requirements: Node ≥ 22, macOS or Linux (`lsof`).
+Requirements: Node ≥ 22. macOS/Linux need `lsof`; Windows uses the built-in `netstat` plus PowerShell (`Get-CimInstance`) — the USER column stays empty on Windows.

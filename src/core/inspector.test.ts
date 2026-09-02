@@ -1,6 +1,14 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveConfig } from './config.js';
-import { joinListenRows, parseLsofOutput, ScanError, scanProcesses, type ProcessInfo } from './inspector.js';
+import {
+  joinListenRows,
+  parseCimProcessCsv,
+  parseLsofOutput,
+  parseNetstatOutput,
+  ScanError,
+  scanProcesses,
+  type ProcessInfo,
+} from './inspector.js';
 
 const HEADER = 'COMMAND   PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME';
 
@@ -117,13 +125,22 @@ describe('joinListenRows', () => {
 const execState = vi.hoisted(() => ({
   lsof: null as null | (() => Promise<{ stdout: string }>),
   ps: null as null | (() => Promise<{ stdout: string }>),
+  netstat: null as null | (() => Promise<{ stdout: string }>),
+  cim: null as null | (() => Promise<{ stdout: string }>),
 }));
 
 vi.mock('node:child_process', () => {
   const promisifyCustom = Symbol.for('nodejs.util.promisify.custom');
   const execFile = Object.assign(() => {}, {
     [promisifyCustom]: (file: string) => {
-      const handler = file === 'lsof' ? execState.lsof : execState.ps;
+      const handler =
+        file === 'lsof'
+          ? execState.lsof
+          : file === 'ps'
+            ? execState.ps
+            : file === 'netstat'
+              ? execState.netstat
+              : execState.cim;
       if (handler === null) throw new Error(`no ${file} stub configured for this test`);
       return handler();
     },
@@ -162,10 +179,24 @@ function stubScan(): void {
   execState.ps = async () => ({ stdout: PS_ROWS });
 }
 
+const realPlatform = process.platform;
+const setPlatform = (value: NodeJS.Platform): void => {
+  Object.defineProperty(process, 'platform', { value, configurable: true });
+};
+
 describe('scanProcesses (execFile stubbed, platform-independent)', () => {
+  // scanProcesses picks its backend from process.platform; the POSIX suite
+  // pins a linux platform so the lsof/ps branch runs on any host OS.
+  beforeEach(() => {
+    setPlatform('linux');
+  });
+
   afterEach(() => {
     execState.lsof = null;
     execState.ps = null;
+    execState.netstat = null;
+    execState.cim = null;
+    setPlatform(realPlatform);
   });
 
   it('joins lsof + ps output and applies the default dev filter', async () => {
@@ -307,5 +338,179 @@ describe('scanProcesses (execFile stubbed, platform-independent)', () => {
       throw 'plain ps failure';
     };
     await expect(scanProcesses(resolveConfig({}))).rejects.toThrow('ps failed: plain ps failure');
+  });
+});
+
+// ── Windows backend (netstat + PowerShell CIM) ──────────────────────────────
+
+const NETSTAT_ROWS = [
+  '',
+  '  Proto  Local Address          Foreign Address        State           PID',
+  '  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       111',
+  '  TCP    127.0.0.1:3001         127.0.0.1:3001         LISTENING       111',
+  '  TCP    [::]:45943             [::]:0                 LISTENING       222',
+  '  TCP    192.168.1.5:5173       0.0.0.0:0              LISTENING       333',
+  '  TCP    10.0.0.2:5432          10.0.0.1:5000          ESTABLISHED     333', // state filter
+  '  UDP    0.0.0.0:5353           *:*                                    111', // proto filter
+  '  TCP    0.0.0.0:0              0.0.0.0:0              LISTENING       0', // pid filter
+  '  TCP    0.0.0.0:70000          0.0.0.0:0              LISTENING       111', // port range filter
+  '  TCP    localhost              0.0.0.0:0              LISTENING       111', // no port -> skip
+  '  TCP    0.0.0.0:4001          0.0.0.0:0              LISTENING       notapid', // non-numeric pid
+  '  TCP    0.0.0.0:4002          0.0.0.0:0              LISTENING       -5', // non-positive pid
+  '  short line', // too few columns -> skip
+  '',
+].join('\n');
+
+// Realistic CRLF output: PowerShell emits \r\n line endings, and a trailing
+// \r must not leak into the CommandLine field. Escaped quotes and commas
+// exercise the CSV parser; the 2-field python line covers a missing (null)
+// CommandLine column and the empty nc command covers the image-name fallback.
+const CIM_CSV = [
+  '"ProcessId","Name","CommandLine"',
+  '"111","node.exe","C:\\\\tool\\\\node.exe ""--flag=a,b"" --port 3000"',
+  '"222","nc.exe",""',
+  '"333","python.exe"',
+  '"444","",""',
+  '"notapid","x.exe","y"',
+  '"0","zero.exe",""',
+  // Unquoted fields: the parser tolerates raw CSV, not just ConvertTo-Csv.
+  '999,plain.exe,plain --serve 8080',
+  '',
+].join('\r\n');
+
+function stubWindowsScan(): void {
+  execState.netstat = async () => ({ stdout: NETSTAT_ROWS });
+  execState.cim = async () => ({ stdout: CIM_CSV });
+}
+
+describe('parseNetstatOutput (Windows)', () => {
+  it('parses TCP LISTENING rows and skips every other line shape', () => {
+    expect(
+      parseNetstatOutput(NETSTAT_ROWS).map((row) => [row.pid, row.entry.port, row.entry.address]),
+    ).toEqual([
+      [111, 3000, '0.0.0.0:3000'],
+      [111, 3001, '127.0.0.1:3001'],
+      [222, 45943, '[::]:45943'],
+      [333, 5173, '192.168.1.5:5173'],
+    ]);
+  });
+});
+
+describe('parseCimProcessCsv (Windows)', () => {
+  it('parses quoted CSV with escapes, commas and empty command lines', () => {
+    const infos = parseCimProcessCsv(CIM_CSV);
+    expect(infos.get(111)).toEqual({
+      name: 'node',
+      command: 'C:\\\\tool\\\\node.exe "--flag=a,b" --port 3000',
+      user: '',
+    });
+    expect(infos.get(222)).toEqual({ name: 'nc', command: 'nc', user: '' });
+    expect(infos.get(333)).toEqual({ name: 'python', command: 'python', user: '' });
+    expect(infos.get(444)).toEqual({ name: '', command: '', user: '' });
+    expect(infos.get(999)).toEqual({ name: 'plain', command: 'plain --serve 8080', user: '' });
+    expect(infos.size).toBe(5);
+  });
+});
+
+describe('scanProcesses (Windows netstat + CIM path)', () => {
+  afterEach(() => {
+    execState.netstat = null;
+    execState.cim = null;
+  });
+
+  it('joins netstat sockets with the CIM process table under a win32 platform', async () => {
+    const originalPlatform = process.platform;
+    setPlatform('win32');
+    try {
+      stubWindowsScan();
+      const snap = await scanProcesses(resolveConfig({}));
+      expect(snap.platform).toBe('win32');
+      expect(snap.scannedCount).toBe(3);
+      expect(snap.processes.map((proc) => `${proc.name}#${proc.pid}`)).toEqual([
+        'node#111',
+        'python#333',
+      ]);
+      expect(snap.processes[0]?.command).toBe('C:\\\\tool\\\\node.exe "--flag=a,b" --port 3000');
+      expect(snap.processes[0]?.ports).toEqual([
+        { port: 3000, address: '0.0.0.0:3000' },
+        { port: 3001, address: '127.0.0.1:3001' },
+      ]);
+    } finally {
+      setPlatform(originalPlatform);
+    }
+  });
+
+  it('applies only= and the hard ports= constraint on the Windows path too', async () => {
+    const originalPlatform = process.platform;
+    setPlatform('win32');
+    try {
+      stubWindowsScan();
+      const revealed = await scanProcesses(resolveConfig({}), { only: ['\\bnc\\b'] });
+      expect(revealed.processes.map((proc) => `${proc.name}#${proc.pid}`)).toEqual([
+        'node#111',
+        'python#333',
+        'nc#222',
+      ]);
+      const narrowed = await scanProcesses(resolveConfig({}), { all: true, ports: [3001] });
+      expect(narrowed.processes.map((proc) => proc.pid)).toEqual([111]);
+    } finally {
+      setPlatform(originalPlatform);
+    }
+  });
+
+  it('maps a missing netstat to a ScanError', async () => {
+    const originalPlatform = process.platform;
+    setPlatform('win32');
+    try {
+      execState.netstat = async () => {
+        throw Object.assign(new Error('spawn netstat ENOENT'), { code: 'ENOENT' });
+      };
+      execState.cim = async () => ({ stdout: CIM_CSV });
+      await expect(scanProcesses(resolveConfig({}))).rejects.toThrow(
+        '`netstat` was not found on PATH.',
+      );
+    } finally {
+      setPlatform(originalPlatform);
+    }
+  });
+
+  it('maps a missing powershell to a ScanError', async () => {
+    const originalPlatform = process.platform;
+    setPlatform('win32');
+    try {
+      execState.netstat = async () => ({ stdout: NETSTAT_ROWS });
+      execState.cim = async () => {
+        throw Object.assign(new Error('spawn powershell ENOENT'), { code: 'ENOENT' });
+      };
+      await expect(scanProcesses(resolveConfig({}))).rejects.toThrow(
+        '`powershell` was not found on PATH.',
+      );
+    } finally {
+      setPlatform(originalPlatform);
+    }
+  });
+
+  it('maps netstat and powershell failures to ScanErrors', async () => {
+    const originalPlatform = process.platform;
+    setPlatform('win32');
+    try {
+      execState.netstat = async () => {
+        throw new Error('netstat exploded');
+      };
+      execState.cim = async () => ({ stdout: CIM_CSV });
+      await expect(scanProcesses(resolveConfig({}))).rejects.toThrow(
+        'netstat failed: netstat exploded',
+      );
+
+      execState.netstat = async () => ({ stdout: NETSTAT_ROWS });
+      execState.cim = async () => {
+        throw new Error('powershell is blocked');
+      };
+      await expect(scanProcesses(resolveConfig({}))).rejects.toThrow(
+        'powershell failed: powershell is blocked',
+      );
+    } finally {
+      setPlatform(originalPlatform);
+    }
   });
 });

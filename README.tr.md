@@ -58,7 +58,7 @@ Proje kökünde `wrongport.config.json` (veya `.wrongportrc.json`), yoksa `~/.co
 npm run dev:api      # API'yi tsx watch ile çalıştırır (3789)
 npm run dev:web      # Vite dev sunucusu (5174, /api → 3789 proxy)
 npm run typecheck    # hem node hem web tarafı için tsc
-npm test             # vitest: 17 dosya / 194 birim test (ayrıntı: aşağıdaki Testler)
+npm test             # vitest: 17 dosya / 202 birim test (ayrıntı: aşağıdaki Testler)
 npm run test:coverage  # aynı süit + v8 coverage raporu (%100 gate)
 npm run verify       # typecheck + coverage'lı test + build zinciri (tek komut, sırayla)
 npm run release      # release hattı — aşağıdaki Release bölümüne bakın
@@ -79,7 +79,7 @@ Tag'i pushlamak (`npm run release -- --push`) GitHub Actions `Release` workflow'
 ## Testler
 
 ```bash
-npm test               # vitest run — 17 dosya / 194 test (~2,5 sn)
+npm test               # vitest run — 17 dosya / 202 test (~2,5 sn)
 npm run test:coverage  # aynı süit + v8 coverage raporu
 ```
 
@@ -87,7 +87,7 @@ Coverage `vitest.config.ts` içinde **%100 statement / branch / function / line*
 
 | Dosya | Kapsam |
 | --- | --- |
-| `src/core/inspector.test.ts` | lsof çıktı ayrıştırma: ` (LISTEN)` sonekli/soneksiz satırlar, IPv4/IPv6 bind'ler, başlık/bozuk/port'suz/aralık dışı satırların atlanması, boş çıktı; `joinListenRows`: ps tercihı, yarış durumu yedeği, port birleştirme/tekilleştirme; **stub'lu `execFile`** ile `scanProcesses` seçim semantiği (gerçek lsof/ps yok): varsayılan dev filtresi, eklemeli `only=`, `all=1` dâhil sert `ports=` kısıtı, config-port yedeği, exclude desenleri, `matched` bayrakları, sıralama + pid eşitliği kırılımı ve tüm `ScanError` eşlemeleri (eksik lsof/ps, exit 1 = boş sonuç, genel ve Error-olmayan hatalar) |
+| `src/core/inspector.test.ts` | lsof çıktı ayrıştırma: ` (LISTEN)` sonekli/soneksiz satırlar, IPv4/IPv6 bind'ler, başlık/bozuk/port'suz/aralık dışı satırların atlanması, boş çıktı; `joinListenRows`: ps tercihı, yarış durumu yedeği, port birleştirme/tekilleştirme; **stub'lu `execFile`** ile `scanProcesses` seçim semantiği (gerçek lsof/ps yok): varsayılan dev filtresi, eklemeli `only=`, `all=1` dâhil sert `ports=` kısıtı, config-port yedeği, exclude desenleri, `matched` bayrakları, sıralama + pid eşitliği kırılımı ve tüm `ScanError` eşlemeleri (eksik lsof/ps, exit 1 = boş sonuç, genel ve Error-olmayan hatalar); **Windows yolu**: `netstat` + `Get-CimInstance` CSV ayrıştırma (CRLF güvenli, tırnaklı/tıraksız alanlar, bozuk pid'ler), win32'de `only=`/`ports=` seçimi, netstat/powershell ENOENT + hata eşlemeleri |
 | `src/core/config.test.ts` | Config keşfi ve doğrulama: dosya önceliği (`wrongport.config.json` > `.wrongportrc.json` > `~/.config`), bozuk JSON ve tip hataları → `ConfigError`, kökü obje olmayan config reddi, varsayılan include/exclude birleşimi (WrongPort kendisi her zaman hariç), geçersiz regex reddi |
 | `src/core/kill.test.ts` | Kill güvenliği: geçersiz pid reddi (0, 1, negatif, NaN), self-pid guard, olmayan pid → `ProcessNotFoundError`, gerçek çocuk süreçlerle SIGTERM ve SIGKILL akışları, EPERM/ESRCH sonda eşlemesi, sarmalanan sinyal hataları, bekleme aşımı → `exited: false` |
 | `src/server/app.test.ts` | API güvenlik kısıtları (hono `app.request` + **enjekte edilebilir scan double**) — kill yolları gerçektir (spawn edilen süreçler + gerçek sinyaller): bozuk gövde → 400, taramada görünmeyen pid → 409, snapshot'taki süreç → 200 + gerçek çıkış + tekrar → 409, self-pid → 500, snapshot sonrası ölen pid → 404; sorgu parametreleri (`all=1` dâhil sert `ports=` kısıtı, eklemeli `only=`, boş/bozuk tokenlar, boş `ports=` → port 0 tuhaflığı); geçersiz `only` deseni → 400 + mesaj; sertleştirme: content-type yoksa/JSON değilse → 415, yabancı `Host` → 403; hata eşlemesi: `ScanError` → 503, beklenmeyen → 500; statik UI sunumu: SPA fallback, sondaki bölü çizgili dizinler, değişmez `/assets/`, mime tablosu, directory traversal → 403, NUL/bozuk yüzde kaçışı → 400, kabuk yoksa → 404; `startServer`: EADDRINUSE, port 0, `WRONGPORT_PORT`/`WRONGPORT_HOST` env önceliği, `0.0.0.0`/`::` → localhost gösterimi |
@@ -126,4 +126,4 @@ Notlar:
 | `GET /api/processes?all=1` | Snapshot (JSON); `only`, `ports` sorgu parametreleri opsiyonel; geçersiz `only` deseni → 400 + mesaj; tarama hatası → 503 + `{error}`, beklenmeyen hata → 500 + `{error}` |
 | `POST /api/kill` | Body: `{"pid": 1234, "force": false}`; `Content-Type: application/json` zorunludur (değilse 415); loopback'e bağlıyken `Host` başlığı doğrulanır (yabancıysa 403); pid ≤ 1 → 400; son tarama penceresinde olmayan pid → 409 |
 
-Gereksinimler: Node ≥ 22, macOS veya Linux (`lsof`).
+Gereksinimler: Node ≥ 22. macOS/Linux `lsof` ister; Windows yerleşik `netstat` + PowerShell (`Get-CimInstance`) kullanır — kullanıcı sütunu Windows'ta boş kalır.
