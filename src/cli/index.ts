@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { realpathSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig, resolveConfig } from '../core/config.js';
 import { scanProcesses } from '../core/inspector.js';
 import { killProcess, ProcessNotFoundError } from '../core/kill.js';
@@ -110,7 +111,7 @@ function openBrowser(url: string): void {
   }
 }
 
-const program = new Command();
+export const program = new Command();
 
 program
   .name('wrongport')
@@ -252,4 +253,23 @@ program
     }
   });
 
-program.parseAsync();
+/**
+ * True when this module is the node entry point — either invoked directly or
+ * through a symlinked bin shim (npm link), where argv[1] keeps the symlink
+ * path while import.meta.url resolves to the real file. Without this guard,
+ * merely importing the module would execute the CLI.
+ */
+export function isMainModule(
+  moduleUrl: string = import.meta.url,
+  argv1: string | undefined = process.argv[1],
+): boolean {
+  if (argv1 === undefined) return false;
+  if (moduleUrl === pathToFileURL(path.resolve(argv1)).href) return true;
+  try {
+    return moduleUrl === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) void program.parseAsync();

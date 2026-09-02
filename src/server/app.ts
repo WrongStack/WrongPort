@@ -74,8 +74,9 @@ export function createApp(
   app.onError((err, c) => {
     // Scan failures (lsof missing, timeouts) are transient and user-fixable —
     // surface the message instead of an opaque Internal Server Error.
+    // Hono only ever delivers real Error instances here.
     if (err instanceof ScanError) return c.json({ error: err.message }, 503);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: err.message }, 500);
   });
 
   if (loopbackBound) {
@@ -178,7 +179,7 @@ export function createApp(
           // SPA fallback: unknown paths get the app shell.
           const content = await readFile(indexHtml);
           return c.body(new Uint8Array(content), 200, {
-            'Content-Type': MIME_TYPES['.html'] ?? 'text/html; charset=utf-8',
+            'Content-Type': MIME_TYPES['.html'] as string,
             'Cache-Control': 'no-cache',
           });
         } catch {

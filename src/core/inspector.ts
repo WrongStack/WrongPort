@@ -65,8 +65,8 @@ export function parseLsofOutput(stdout: string): ListenRow[] {
     if (!Number.isInteger(pid) || pid <= 0) continue;
     rows.push({
       pid,
-      name: cols[0] ?? '',
-      user: cols[2] ?? '',
+      name: cols[0] as string,
+      user: cols[2] as string,
       entry: { port, address: raw.replace(/\s+\([^)]*\)$/, '') },
     });
   }
@@ -112,16 +112,20 @@ async function readProcessInfos(): Promise<Map<number, ProcessInfo>> {
     const userEnd = rest.indexOf(' ');
     if (userEnd === -1) continue;
     const user = rest.slice(0, userEnd);
+    // trim() removed any trailing whitespace, so a line that still has a user
+    // separator always carries a non-empty command here.
     const command = rest.slice(userEnd + 1).trimStart();
-    if (!command) continue;
     map.set(pid, { name: displayBaseName(command), command, user });
   }
   return map;
 }
 
 function displayBaseName(command: string): string {
-  const first = command.split(/\s+/, 1)[0] ?? command;
-  return first.split('/').pop() ?? first;
+  // split(limit) always yields a first element and split('/') of a non-empty
+  // string always has a last one — plain indexing, no fallback branches.
+  const first = command.split(/\s+/, 1)[0] as string;
+  const parts = first.split('/');
+  return parts[parts.length - 1] as string;
 }
 
 function matches(
@@ -197,9 +201,8 @@ export async function scanProcesses(
     }
     return proc.matched;
   });
-  selected.sort(
-    (a, b) => (a.ports[0]?.port ?? Number.MAX_SAFE_INTEGER) - (b.ports[0]?.port ?? Number.MAX_SAFE_INTEGER) || a.pid - b.pid,
-  );
+  // Every joined process owns at least one port, so plain indexing is safe.
+  selected.sort((a, b) => a.ports[0]!.port - b.ports[0]!.port || a.pid - b.pid);
 
   return { createdAt: Date.now(), platform: process.platform, processes: selected, scannedCount: all.length };
 }
